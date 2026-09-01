@@ -53,6 +53,7 @@ from tools.investigation.stages.gather_evidence.prompt import (
 from tools.investigation.stages.gather_evidence.tools import (
     MAX_STAGNANT_ITERATIONS,
     STAGNATION_NUDGE,
+    attach_investigation_meta,
     build_connected_tool_context,
     build_seed_calls,
     get_available_tools,
@@ -189,7 +190,7 @@ class ConnectedInvestigationAgent:
         self._tracker.start("investigation_agent", "Running investigation agent loop")
 
         state_dict = cast(dict[str, Any], state)
-        resolved = dict(state.get("resolved_integrations") or {})
+        resolved = attach_investigation_meta(state.get("resolved_integrations") or {}, state_dict)
         available_tools = list(self._filter_tools(list(get_available_tools(resolved))))
         tools = list(select_investigation_tools(available_tools, state_dict))
         tool_context = build_connected_tool_context(resolved, tools)

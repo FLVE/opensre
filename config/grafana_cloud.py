@@ -69,11 +69,35 @@ def get_grafana_instance_url() -> str:
 
 
 def get_datasource_uids() -> tuple[str, str, str]:
+    """Return ``(loki, tempo, mimir)`` UIDs, falling back to Grafana Cloud defaults.
+
+    A present-but-empty entry (``GRAFANA_MIMIR_DATASOURCE_UID=`` left in a
+    ``.env`` template) counts as unset: ``os.getenv``'s default only applies to
+    a missing key, so without this the placeholder would suppress the default.
+    """
     load_env()
-    loki_uid = _get_env(GRAFANA_LOKI_DATASOURCE_UID_ENV, DEFAULT_LOKI_UID)
-    tempo_uid = _get_env(GRAFANA_TEMPO_DATASOURCE_UID_ENV, DEFAULT_TEMPO_UID)
-    mimir_uid = _get_env(GRAFANA_MIMIR_DATASOURCE_UID_ENV, DEFAULT_MIMIR_UID)
-    return loki_uid, tempo_uid, mimir_uid
+    configured_loki, configured_tempo, configured_mimir = get_configured_datasource_uids()
+    return (
+        configured_loki or DEFAULT_LOKI_UID,
+        configured_tempo or DEFAULT_TEMPO_UID,
+        configured_mimir or DEFAULT_MIMIR_UID,
+    )
+
+
+def get_configured_datasource_uids() -> tuple[str, str, str]:
+    """Return only the UIDs an operator actually set; empty strings otherwise.
+
+    Distinct from :func:`get_datasource_uids`, which substitutes Grafana Cloud
+    defaults. Callers ranking configuration above auto-discovery need to tell a
+    deliberate choice from a default, and a present-but-empty ``.env`` entry is
+    not a choice.
+    """
+    load_env()
+    return (
+        _get_env(GRAFANA_LOKI_DATASOURCE_UID_ENV).strip(),
+        _get_env(GRAFANA_TEMPO_DATASOURCE_UID_ENV).strip(),
+        _get_env(GRAFANA_MIMIR_DATASOURCE_UID_ENV).strip(),
+    )
 
 
 def get_otlp_endpoint() -> str:

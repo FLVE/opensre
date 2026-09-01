@@ -5,7 +5,10 @@ from typing import Any, cast
 
 from core.domain.types.retrieval import RetrievalControls
 from core.tool.contracts import RegisteredTool
-from tools.investigation.stages.gather_evidence.tools import build_connected_tool_context
+from tools.investigation.stages.gather_evidence.tools import (
+    attach_investigation_meta,
+    build_connected_tool_context,
+)
 
 
 def _tool(name: str, source: str) -> RegisteredTool:
@@ -55,3 +58,26 @@ def test_build_connected_tool_context_marks_membership_and_sorts() -> None:
     # Assert: tools grouped under their source; action names sorted.
     assert sources["datadog"]["tools"] == ["dd_query"]
     assert ctx["available_action_names"] == ["dd_query", "gf_logs", "pd_list"]
+
+
+def test_attach_investigation_meta_shares_the_incident_window() -> None:
+    """``_meta`` is how tools reach investigation-level context they all share.
+
+    Without it every tool defaults its own time range and the window resolved
+    at intake never reaches a vendor API.
+    """
+    window = {"since": "2026-08-31T05:00:00Z", "until": "2026-08-31T05:30:00Z"}
+    resolved = {"grafana": {"url": "y"}}
+
+    merged = attach_investigation_meta(resolved, {"incident_window": window})
+
+    assert merged["_meta"]["incident_window"] == window
+    assert merged["grafana"] == {"url": "y"}
+    # The caller's dict is not mutated — agent state must stay clean.
+    assert "_meta" not in resolved
+
+
+def test_attach_investigation_meta_omits_meta_when_there_is_no_window() -> None:
+    merged = attach_investigation_meta({"grafana": {"url": "y"}}, {})
+
+    assert "_meta" not in merged

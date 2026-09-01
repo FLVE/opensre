@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -73,15 +74,32 @@ def _pick_numeric_key(row: dict[str, str], skip: set[str]) -> str | None:
     return None
 
 
-def _read_limited_rows(path: Path, max_rows: int) -> tuple[list[str], list[dict[str, str]]]:
+def _read_limited_rows(
+    path: Path,
+    max_rows: int,
+    *,
+    within: Callable[[float], bool] | None = None,
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Read up to ``max_rows`` rows, counting only those inside ``within``.
+
+    The cap has to apply to matches, not to file position: a recorded day holds
+    more rows than the cap, so filtering afterwards makes any window past the
+    cutoff read as "no data" — which looks like a flat metric rather than a
+    missing one.
+    """
     with path.open(encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         fieldnames = list(reader.fieldnames or [])
+        ts_key = _pick_time_key(fieldnames) if within is not None else None
         rows: list[dict[str, str]] = []
-        for i, row in enumerate(reader):
-            if i >= max_rows:
-                break
+        for row in reader:
+            if within is not None and ts_key:
+                parsed = _parse_ts(row.get(ts_key) or "")
+                if parsed is None or not within(parsed):
+                    continue
             rows.append({k: (row.get(k) or "") for k in fieldnames})
+            if len(rows) >= max_rows:
+                break
         return fieldnames, rows
 
 
@@ -101,19 +119,37 @@ class OpenSRECsvGrafanaBackend:
         self._max_rows = max_rows_per_file
         self._max_logs = max_output_logs
 
-    def query_timeseries(self, query: str = "", **_: Any) -> dict[str, Any]:
+    def query_timeseries(
+        self, query: str = "", start: str | None = None, end: str | None = None, **_: Any
+    ) -> dict[str, Any]:
+        """Replay recorded series, restricted to ``[start, end)`` when given.
+
+        Callers cite the window they asked for, so returning the whole recorded
+        day under a 30-minute citation would misstate the evidence. The window
+        is half-open to match ``IncidentWindow``. An unparseable bound is
+        ignored rather than emptying the result.
+        """
         metric_dir = self._root / "metric"
         if not metric_dir.is_dir():
             return {"status": "success", "data": {"resultType": "matrix", "result": []}}
 
         metric_data_results: list[dict[str, Any]] = []
         q = (query or "").lower()
+        window_start = _parse_ts(start) if start else None
+        window_end = _parse_ts(end) if end else None
+
+        def _within(ts: float) -> bool:
+            if window_start is not None and ts < window_start:
+                return False
+            return not (window_end is not None and ts >= window_end)
+
+        within = _within if (window_start is not None or window_end is not None) else None
 
         for csv_path in sorted(metric_dir.glob("*.csv")):
             stem = csv_path.stem.lower()
             if q and q not in stem and stem not in q:
                 continue
-            fieldnames, rows = _read_limited_rows(csv_path, self._max_rows)
+            fieldnames, rows = _read_limited_rows(csv_path, self._max_rows, within=within)
             if not rows:
                 continue
             ts_key = _pick_time_key(fieldnames)

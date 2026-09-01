@@ -30,18 +30,33 @@ def record_evidence_entry(
     summary: str | None = None,
     url: str | None = None,
     snippet: str | None = None,
+    key: str | None = None,
 ) -> None:
     """Record a citeable report entry from inside an evidence mapper.
 
     The report's evidence catalog turns each entry into a display id (``E1`` …)
-    the agent can cite. ``source`` is the claim-facing key; the first entry for a
-    given ``source`` wins, and a bespoke catalog reader for the same key takes
-    precedence. Lets a tool's output become citeable without editing the shared
-    catalog builder.
+    the agent can cite. ``source`` is the claim-facing key; a bespoke catalog
+    reader for the same source takes precedence. Lets a tool's output become
+    citeable without editing the shared catalog builder.
+
+    ``key`` distinguishes repeated calls to one tool that produce genuinely
+    separate evidence — a metrics tool queried once per metric, say. Entries
+    sharing a ``(source, key)`` collapse to the first; without a ``key`` the
+    whole ``source`` collapses to one entry, which is right for tools that
+    yield a single body of evidence per investigation.
     """
     entries = evidence.setdefault(CATALOG_ENTRIES_KEY, [])
     if not isinstance(entries, list):
         return
-    entries.append(
-        {"source": source, "label": label, "summary": summary, "url": url, "snippet": snippet}
-    )
+    entry: dict[str, Any] = {
+        "source": source,
+        "label": label,
+        "summary": summary,
+        "url": url,
+        "snippet": snippet,
+    }
+    # Only when supplied, so callers that record one body of evidence per
+    # investigation keep the entry shape they already assert on.
+    if key:
+        entry["key"] = key
+    entries.append(entry)

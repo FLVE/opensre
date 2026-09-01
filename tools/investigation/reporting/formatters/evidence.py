@@ -56,6 +56,13 @@ def _format_tool_calls_line(
             parts.append(f"{len(errors)} errors")
         return ", ".join(parts)
 
+    def _grafana_metrics_count(e: dict) -> str | None:
+        results = e.get("grafana_metric_results") or {}
+        count = len(results) if isinstance(results, dict) else 0
+        if not count:
+            return None
+        return f"{count} metric" if count == 1 else f"{count} metrics"
+
     def _datadog_logs_count(e: dict) -> str | None:
         logs = e.get("datadog_logs", [])
         errors = e.get("datadog_error_logs", [])
@@ -163,9 +170,9 @@ def _format_tool_calls_line(
         ),
         "query_grafana_metrics": (
             "Grafana Mimir",
-            lambda e: (
-                f"{len(e.get('grafana_metrics', []))} metrics" if e.get("grafana_metrics") else None
-            ),
+            # Counts distinct metrics queried: ``grafana_metrics`` holds only the
+            # last call's series, so it undercounts a multi-metric investigation.
+            _grafana_metrics_count,
             lambda _: f"{grafana_endpoint.rstrip('/')}/explore" if grafana_endpoint else None,
         ),
         "query_grafana_alert_rules": (

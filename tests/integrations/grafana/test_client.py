@@ -67,13 +67,18 @@ def test_client_falls_back_to_env_datasource_uids_when_discovery_empty(
     grafana_client._grafana_client_cache.clear()
 
 
-def test_client_prefers_discovered_uids_over_env_fallbacks(
+def test_client_prefers_discovered_uids_when_no_uid_is_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Discovery stays in charge for installs that configure no UID at all."""
     from integrations.grafana import client as grafana_client
 
     grafana_client._grafana_client_cache.clear()
-    monkeypatch.setenv("GRAFANA_LOKI_DATASOURCE_UID", "env-loki")
+    # Without this the developer's own .env is read back in after delenv, so the
+    # result would depend on whose machine runs the suite.
+    monkeypatch.setenv("GRAFANA_CONFIG_SKIP_ENV_FILE", "1")
+    for name in ("LOKI", "TEMPO", "MIMIR"):
+        monkeypatch.delenv(f"GRAFANA_{name}_DATASOURCE_UID", raising=False)
     monkeypatch.setattr(
         grafana_client.GrafanaClient,
         "discover_datasource_uids",
@@ -86,6 +91,55 @@ def test_client_prefers_discovered_uids_over_env_fallbacks(
 
     assert client.loki_datasource_uid == "discovered-loki"
     assert client.tempo_datasource_uid == "discovered-tempo"
-    # Mimir missing from discovery → env/cloud default fallback
-    assert client.mimir_datasource_uid
+    # Mimir missing from discovery → Grafana Cloud default as last resort.
+    assert client.mimir_datasource_uid == "grafanacloud-prom"
+    grafana_client._grafana_client_cache.clear()
+
+
+def test_a_configured_uid_wins_over_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Discovery picks the ``isDefault`` datasource, which on an instance with
+    many Prometheus datasources is routinely the wrong one. An operator who
+    names a UID has resolved that ambiguity — a heuristic must not override it.
+    """
+    from integrations.grafana import client as grafana_client
+
+    grafana_client._grafana_client_cache.clear()
+    monkeypatch.setenv("GRAFANA_MIMIR_DATASOURCE_UID", "configured-mimir")
+    monkeypatch.setattr(
+        grafana_client.GrafanaClient,
+        "discover_datasource_uids",
+        lambda _self: {"mimir_uid": "discovered-mimir", "loki_uid": "discovered-loki"},
+    )
+
+    client = grafana_client.get_grafana_client_from_credentials(
+        endpoint="http://grafana.example.com", api_key="token", account_id="configured_wins"
+    )
+
+    assert client.mimir_datasource_uid == "configured-mimir"
+    # Types the operator did not pin still come from discovery.
+    assert client.loki_datasource_uid == "discovered-loki"
+    grafana_client._grafana_client_cache.clear()
+
+
+def test_an_empty_configured_uid_does_not_shadow_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``GRAFANA_MIMIR_DATASOURCE_UID=`` in a .env is present-but-unset, which
+    is not a choice of datasource.
+    """
+    from integrations.grafana import client as grafana_client
+
+    grafana_client._grafana_client_cache.clear()
+    monkeypatch.setenv("GRAFANA_MIMIR_DATASOURCE_UID", "")
+    monkeypatch.setattr(
+        grafana_client.GrafanaClient,
+        "discover_datasource_uids",
+        lambda _self: {"mimir_uid": "discovered-mimir"},
+    )
+
+    client = grafana_client.get_grafana_client_from_credentials(
+        endpoint="http://grafana.example.com", api_key="token", account_id="empty_env"
+    )
+
+    assert client.mimir_datasource_uid == "discovered-mimir"
     grafana_client._grafana_client_cache.clear()

@@ -13,6 +13,12 @@
 #   docker build -t opensre-gateway:latest .
 #   docker run -e MODE=gateway --env-file .env opensre-gateway:latest
 #
+# Behind a network that cannot reach deb.debian.org / pypi.org, point both at a
+# mirror (defaults are the upstream sources, so plain builds are unaffected):
+#   docker build \
+#     --build-arg DEBIAN_MIRROR=https://mirrors.cloud.tencent.com \
+#     --build-arg PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple .
+#
 # Required env vars for gateway mode:
 #   SLACK_BOT_TOKEN + SLACK_APP_TOKEN (Slack) and/or TELEGRAM_BOT_TOKEN +
 #   TELEGRAM_ALLOWED_USERS (Telegram), plus LLM_PROVIDER and API keys
@@ -21,7 +27,17 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN apt-get update \
+# Optional package mirrors for networks that cannot reach the upstream
+# defaults. Both are unset/upstream by default so the canonical image builds
+# anywhere; see the mirrored-build example in the header.
+ARG DEBIAN_MIRROR=""
+ARG PIP_INDEX_URL="https://pypi.org/simple"
+
+RUN if [ -n "$DEBIAN_MIRROR" ]; then \
+        sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" \
+            /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
         build-essential \
@@ -32,8 +48,8 @@ RUN apt-get update \
 COPY . /app
 
 # postgresql extra: psycopg2 for the DATABASE_URL-backed investigations store.
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir ".[postgresql]"
+RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" --upgrade pip \
+    && pip install --no-cache-dir --index-url "$PIP_INDEX_URL" ".[postgresql]"
 
 # Run as a non-root user (uid/gid 1000). /workspace is the writable runtime
 # working area owned by that user.

@@ -45,13 +45,37 @@ def _local_basic_auth_state() -> dict[str, Any]:
 def test_grafana_seed_call_has_valid_public_input(
     tool_function: Callable[..., dict[str, Any]],
 ) -> None:
-    """Every deterministic seed must pass the same schema validation as an LLM call."""
+    """Every deterministic seed must pass the same schema validation as an LLM call.
+
+    A tool whose required arguments cannot be derived from config emits no seed
+    at all (see :func:`test_metrics_tool_emits_no_seed_call`), so the assertion
+    is on the calls that are produced, not on producing one.
+    """
     registered = tool_function.__opensre_registered_tool__  # type: ignore[attr-defined]
 
     calls = build_seed_calls(_local_basic_auth_state(), [registered], object())
 
-    assert len(calls) == 1
-    assert registered.validate_public_input(calls[0].input) is None
+    assert len(calls) <= 1
+    for call in calls:
+        assert registered.validate_public_input(call.input) is None
+
+
+def test_metrics_tool_emits_no_seed_call() -> None:
+    """Which metric to query depends on the alert, and a seed runs before the
+    model has read it — so the metrics tool must not be seeded with a guess.
+    """
+    registered = grafana_tools.query_grafana_metrics.__opensre_registered_tool__  # type: ignore[attr-defined]
+
+    assert build_seed_calls(_local_basic_auth_state(), [registered], object()) == []
+
+
+def test_discovery_tools_are_still_seeded() -> None:
+    """Skipping unsatisfiable seeds must not disable seeding altogether."""
+    registered = grafana_tools.query_grafana_alert_rules.__opensre_registered_tool__  # type: ignore[attr-defined]
+
+    calls = build_seed_calls(_local_basic_auth_state(), [registered], object())
+
+    assert [call.name for call in calls] == ["query_grafana_alert_rules"]
 
 
 @pytest.mark.parametrize("tool_function", GRAFANA_TOOL_FUNCTIONS, ids=_tool_id)
