@@ -434,24 +434,35 @@ def _add_mapped_entries(
     Lets any tool contribute citeable evidence via ``record_evidence_entry``
     without a bespoke reader here. A source already claimed by a bespoke reader
     above is skipped so the richer, hand-written entry wins.
+
+    An entry's ``key`` separates repeated calls to one tool that produce
+    distinct evidence (a metrics tool run once per metric); entries without one
+    collapse to a single citation per source. ``source_to_id`` keeps the first
+    id either way, because claims cite a source rather than an individual call.
     """
     entries = evidence.get(CATALOG_ENTRIES_KEY) or []
     if not isinstance(entries, list):
         return
+    claimed_by_bespoke_reader = set(source_to_id)
+    seen: set[tuple[str, str]] = set()
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         source = entry.get("source")
-        if not source or source in source_to_id:
+        if not source or source in claimed_by_bespoke_reader:
             continue
-        eid = f"evidence/mapped/{source}"
+        key = str(entry.get("key") or "")
+        if (source, key) in seen:
+            continue
+        seen.add((source, key))
+        eid = f"evidence/mapped/{source}/{key}" if key else f"evidence/mapped/{source}"
         catalog[eid] = {
             "label": entry.get("label") or source,
             "url": entry.get("url"),
             "summary": entry.get("summary"),
             "snippet": entry.get("snippet"),
         }
-        source_to_id[source] = eid
+        source_to_id.setdefault(source, eid)
 
 
 def attach_evidence_to_claims(
