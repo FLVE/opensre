@@ -12,7 +12,11 @@ from config.constants.grafana import (
     GRAFANA_READ_TOKEN_ENV,
     GRAFANA_VERIFY_SSL_ENV,
 )
-from config.grafana_cloud import DEFAULT_INSTANCE_URL, get_datasource_uids
+from config.grafana_cloud import (
+    DEFAULT_INSTANCE_URL,
+    get_configured_datasource_uids,
+    get_datasource_uids,
+)
 from integrations.grafana.base import GrafanaClientBase
 from integrations.grafana.config import GrafanaAccountConfig
 from integrations.grafana.loki import LokiMixin
@@ -147,9 +151,14 @@ def _build_and_cache_client(
 ) -> GrafanaClient:
     """Discover datasources once and cache the resulting client.
 
-    Prefer live discovery; when a UID is missing, fall back to
-    ``GRAFANA_*_DATASOURCE_UID`` / Grafana Cloud defaults so env-configured
-    installs still work when auto-discovery is incomplete.
+    UID precedence, highest first:
+
+    1. ``GRAFANA_*_DATASOURCE_UID`` when actually set — discovery picks the
+       ``isDefault`` datasource, which on an instance carrying many Prometheus
+       datasources is routinely not the one holding the metrics in question.
+       A named UID is an answer to that question and must not be overridden.
+    2. Live discovery, so installs that configure nothing still work.
+    3. Grafana Cloud defaults, as a last resort.
     """
     config = GrafanaAccountConfig(
         account_id=account_id,
@@ -163,10 +172,11 @@ def _build_and_cache_client(
     client = GrafanaClient(config=config)
 
     discovered = client.discover_datasource_uids() or {}
-    fallback_loki, fallback_tempo, fallback_mimir = get_datasource_uids()
-    loki_uid = discovered.get("loki_uid") or fallback_loki
-    tempo_uid = discovered.get("tempo_uid") or fallback_tempo
-    mimir_uid = discovered.get("mimir_uid") or fallback_mimir
+    set_loki, set_tempo, set_mimir = get_configured_datasource_uids()
+    default_loki, default_tempo, default_mimir = get_datasource_uids()
+    loki_uid = set_loki or discovered.get("loki_uid") or default_loki
+    tempo_uid = set_tempo or discovered.get("tempo_uid") or default_tempo
+    mimir_uid = set_mimir or discovered.get("mimir_uid") or default_mimir
 
     if loki_uid or tempo_uid or mimir_uid:
         config = GrafanaAccountConfig(
