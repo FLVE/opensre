@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from core import public_tool_input
@@ -16,6 +17,8 @@ from core.llm.types import ToolCall
 from core.tool import RegisteredTool, availability_view
 from infrastructure.observability.trace.redaction import RedactedToolView, redact_tool_view
 from tools.registry import get_registered_tool, get_registered_tools
+
+logger = logging.getLogger(__name__)
 
 # Consecutive iterations made up ENTIRELY of duplicate (already-seen) tool calls
 # that we tolerate before forcing the agent to conclude.
@@ -199,6 +202,26 @@ def build_connected_tool_context(
     }
 
 
+def attach_investigation_meta(
+    resolved_integrations: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a copy of ``resolved_integrations`` carrying shared ``_meta`` context.
+
+    ``_meta`` is the reserved channel for investigation-level context every tool
+    may draw on (today: ``incident_window``). ``availability_view`` passes
+    ``_``-prefixed keys through untouched, so a tool reads it from its
+    ``extract_params`` sources. Tools that don't care ignore the key.
+    """
+    merged = dict(resolved_integrations)
+    incident_window = state.get("incident_window")
+    if isinstance(incident_window, dict) and incident_window:
+        meta = dict(merged.get("_meta") or {})
+        meta["incident_window"] = incident_window
+        merged["_meta"] = meta
+    return merged
+
+
 def build_seed_calls(
     state: dict[str, Any],
     tools: list[RegisteredTool],
@@ -209,7 +232,7 @@ def build_seed_calls(
     if not target_sources:
         return []
 
-    resolved = state.get("resolved_integrations") or {}
+    resolved = attach_investigation_meta(state.get("resolved_integrations") or {}, state)
     tool_sources = availability_view(resolved)
 
     # Enrich kubernetes tool_sources with alert-extracted context so seed calls
@@ -248,6 +271,14 @@ def build_seed_calls(
             for key, value in injected.items()
             if key in public_properties and value is not None
         }
+        # A seed runs before the LLM, so there is nobody to ask for a missing
+        # argument. Drop the seed rather than send an invalid payload — a tool
+        # that cannot be called without knowing what to ask for is not a
+        # deterministic seed, it is a job for the model.
+        invalid = tool.validate_public_input(public_input)
+        if invalid:
+            logger.debug("seed call skipped: %s", invalid)
+            continue
         tool_id = new_tool_use_id() if use_converse_ids else f"seed_{tool.name}"
         calls.append(ToolCall(id=tool_id, name=tool.name, input=public_tool_input(public_input)))
 

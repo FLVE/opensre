@@ -12,6 +12,7 @@ from typing import Any
 
 from infrastructure.evidence.evidence_compaction import compact_traces, summarize_counts
 from infrastructure.evidence.log_compaction import build_error_taxonomy, deduplicate_logs
+from infrastructure.evidence.series_bounds import MAX_SERIES, bound_series, truncation_hint
 
 
 def query_logs_from_backend(
@@ -63,18 +64,35 @@ def query_metrics_from_backend(
     *,
     metric_name: str = "",
     service_name: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
 ) -> dict[str, Any]:
-    """Return a Mimir-shaped payload from an injected Grafana backend."""
-    raw = backend.query_timeseries(query=metric_name)
-    metrics = raw.get("data", {}).get("result", [])
-    return {
+    """Return a Mimir-shaped payload from an injected Grafana backend.
+
+    ``start``/``end`` are forwarded only when both are set, so a windowless
+    call reaches the backend exactly as before.
+    """
+    window = {"start": start, "end": end} if start and end else {}
+    raw = backend.query_timeseries(query=metric_name, **window)
+    series = raw.get("data", {}).get("result", [])
+    # A replayed day holds far more than a Mimir range query would return, and
+    # the transcript budget is the same either way.
+    metrics = bound_series(series)
+    payload: dict[str, Any] = {
         "source": "grafana_mimir",
         "available": True,
         "metrics": metrics,
-        "total_series": len(metrics),
+        "total_series": len(series),
         "metric_name": metric_name,
         "service_name": service_name,
+        # Citations read the window from here, so a backend result has to
+        # report it exactly as the HTTP path does.
+        **window,
     }
+    if len(series) > MAX_SERIES:
+        payload["truncated_series"] = len(series) - MAX_SERIES
+        payload["truncation_hint"] = truncation_hint(MAX_SERIES, len(series))
+    return payload
 
 
 def query_traces_from_backend(
