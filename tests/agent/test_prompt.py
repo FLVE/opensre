@@ -18,6 +18,25 @@ def test_build_investigation_system_prompt_non_hermes_uses_generic_category_inst
     assert "agent_hang" not in prompt
 
 
+def test_build_investigation_system_prompt_pins_a_single_timezone() -> None:
+    """A report mixing CST and UTC between sections sends the on-call to the
+    wrong window; timestamps must share one base timezone.
+    """
+    prompt = build_investigation_system_prompt({"alert_source": "grafana"})
+
+    assert "UTC" in prompt
+    assert "timezone" in prompt.lower()
+
+
+def test_build_investigation_system_prompt_groups_findings() -> None:
+    """A flat list mixes measurements with the negatives that ruled hypotheses
+    out, leaving the reader to sort them.
+    """
+    prompt = build_investigation_system_prompt({"alert_source": "grafana"})
+
+    assert "Ruled out:" in prompt
+
+
 def test_build_investigation_system_prompt_includes_dependency_traversal_rule() -> None:
     prompt = build_investigation_system_prompt({"alert_source": "grafana"})
 
@@ -285,3 +304,47 @@ def test_alert_context_points_to_primary_source_without_duplicating_tool_metadat
     assert "source_id=aws_rds" not in context
     assert "evidence=deployment_metadata" not in context
     assert "avoid=" not in context
+
+
+def test_dict_alert_message_reaches_the_prompt() -> None:
+    """Interactive sessions wrap free text in ``raw_alert["message"]``.
+
+    ``run_investigation_for_session`` builds ``{"alert_name": ..., "message": text}``,
+    so dropping ``message`` leaves the agent with no problem statement at all.
+    """
+    context = format_alert_context(
+        {
+            "alert_name": "Interactive session",
+            "severity": "unknown",
+            "raw_alert": {
+                "alert_name": "Interactive session",
+                "message": (
+                    "Tencent CDB MySQL instance cdbro-ov6a6jkc.\n"
+                    "Incident window: 2026-08-31 05:00:00~05:30:00 UTC.\n"
+                    'Query PromQL: cdb_cpu_use_rate{instanceid=~"cdbro-ov6a6jkc"}'
+                ),
+            },
+            "resolved_integrations": {},
+        },
+        available_tools=[],
+    )
+
+    assert "cdbro-ov6a6jkc" in context
+    assert "cdb_cpu_use_rate" in context
+    assert "05:00:00~05:30:00 UTC" in context
+
+
+def test_dict_alert_message_is_truncated_like_the_string_branch() -> None:
+    """A pasted log dump must not blow the prompt budget."""
+    context = format_alert_context(
+        {
+            "alert_name": "Interactive session",
+            "severity": "unknown",
+            "raw_alert": {"alert_name": "Interactive session", "message": "x" * 5000},
+            "resolved_integrations": {},
+        },
+        available_tools=[],
+    )
+
+    assert "x" * 2000 in context
+    assert "x" * 2001 not in context

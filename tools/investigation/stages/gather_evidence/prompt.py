@@ -73,6 +73,7 @@ After triage and again after stating hypotheses, emit a one-line status block so
 - If a tool returns an error or empty result, try another tool from the same integration before giving up.
 - If all evidence points to healthy service, say so clearly (root_cause_category = healthy).
 - Be specific: include error messages, timestamps, service names, namespaces, run IDs.
+- **Write every timestamp in UTC**, in one timezone throughout the report. A reader who has to convert between sections while paging through an incident will eventually query the wrong window. Add a local time only in parentheses after the UTC value, e.g. `14:30 UTC (22:30 CST)`, and never as the sole form.
 - **Only call tools that are provided to you this turn** (the integrations and tools shown under "Connected integrations"). Do not fabricate tool calls for integrations not listed.
 - **Never call the same tool with the same arguments twice.** You already have that result — re-running it returns nothing new and wastes the investigation. Re-running is only useful with *different* arguments (e.g. a different service, time window, or query).
 - **Discovery or listing tools (those that just enumerate other tools or resources) are useful at most once.** Call such a tool a single time, then act on what it returned — do not keep re-listing.
@@ -98,11 +99,13 @@ When you are done investigating (no more tool calls), write a diagnosis that inc
 - **Root cause**: What failed and why (2-3 sentences, specific)
 - **Root cause category**: {root_cause_category_instruction}
 - **Evidence**: Which tool results support your conclusion
-- **Validated claims**: Specific facts confirmed by evidence (e.g. "Error rate spiked to 47% at 14:32 UTC per Grafana logs")
+- **Validated claims**: Specific facts confirmed by evidence (e.g. "Error rate spiked to 47% at 14:32 UTC per Grafana logs"). Order them so the reader can skim: first what identifies the affected resource, then the measurements that carry the diagnosis, then the negatives — each prefixed `Ruled out:` — that eliminated a hypothesis (e.g. "Ruled out: deadlock storm — deadlock events stayed at 0"). A negative finding is worth stating; burying it among the measurements is what makes it useless.
 - **Non-validated claims**: Hypotheses you could not confirm
 - **Remediation steps**: Ordered, concrete actions to fix the issue — recommended option first, ordered by blast radius (smallest first) and reversibility
 - **Validity score**: 0.0–1.0 reflecting your confidence based on evidence quality
 """
+
+_MAX_RAW_ALERT_CHARS = 2000
 
 _ALERT_CONTEXT_TEMPLATE = """## Alert
 
@@ -175,6 +178,13 @@ def format_alert_context(
     )
 
 
+def _raw_alert_text(value: Any) -> list[str]:
+    """Render free-text alert body as a prompt block, or nothing when absent."""
+    if not isinstance(value, str) or not value.strip():
+        return []
+    return [f"Raw alert:\n{value[:_MAX_RAW_ALERT_CHARS]}"]
+
+
 def _build_extra_parts(state: dict[str, Any]) -> list[str]:
     parts: list[str] = []
     raw_alert = state.get("raw_alert")
@@ -194,8 +204,12 @@ def _build_extra_parts(state: dict[str, Any]) -> list[str]:
         annotations = raw_alert.get("commonAnnotations") or {}
         if isinstance(annotations, dict) and annotations.get("description"):
             parts.append(f"Description: {annotations['description']}")
-    elif isinstance(raw_alert, str) and raw_alert.strip():
-        parts.append(f"Raw alert:\n{raw_alert[:2000]}")
+        # Interactive sessions carry the operator's whole request here, not in
+        # the vendor-shaped keys above. Without it the agent has no problem
+        # statement — only the alert name.
+        parts.extend(_raw_alert_text(raw_alert.get("message") or raw_alert.get("text")))
+    elif isinstance(raw_alert, str):
+        parts.extend(_raw_alert_text(raw_alert))
 
     problem_md = state.get("problem_md")
     if problem_md and isinstance(problem_md, str):
