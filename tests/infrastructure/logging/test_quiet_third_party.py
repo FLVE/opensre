@@ -64,3 +64,25 @@ def test_urllib3_connection_retries_stay_off_the_user_tty() -> None:
         assert not pool.isEnabledFor(logging.WARNING)
     finally:
         pool.setLevel(previous)
+
+
+def test_lock_and_timezone_chatter_does_not_drown_a_debug_run() -> None:
+    """The first real DEBUG run wrote 10 filelock/tzlocal records for every one
+    of OpenSRE's own; nothing had exercised these loggers before.
+    """
+    from infrastructure.logging.quiet_third_party import quiet_noisy_third_party_loggers
+
+    noisy = [logging.getLogger(name) for name in ("filelock", "tzlocal")]
+    previous = [each.level for each in noisy]
+    root = logging.getLogger()
+    previous_root = root.level
+    try:
+        quiet_noisy_third_party_loggers()
+        # The file sink lowers the root; without an own level these inherit it.
+        root.setLevel(logging.DEBUG)
+
+        assert all(not each.isEnabledFor(logging.DEBUG) for each in noisy)
+    finally:
+        root.setLevel(previous_root)
+        for each, level in zip(noisy, previous, strict=True):
+            each.setLevel(level)

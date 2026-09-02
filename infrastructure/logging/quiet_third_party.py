@@ -23,6 +23,11 @@ _WARNING_FLOOR = (
     "anthropic",
     "httpcore.connection",
     "httpcore.http11",
+    # Every lock acquire/release and timezone lookup, at DEBUG. Invisible until
+    # OPENSRE_LOG_FILE made a DEBUG run practical; the first one wrote ten of
+    # these for every record OpenSRE emitted itself.
+    "filelock",
+    "tzlocal",
 )
 
 # urllib3 logs every connection retry at WARNING ("Retrying (Retry(total=2,
