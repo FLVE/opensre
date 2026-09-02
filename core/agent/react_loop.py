@@ -211,6 +211,13 @@ class ReactLoop[RuntimeToolT: RuntimeTool]:
                     if self._cancel_requested():
                         self._mark_cancelled()
                     else:
+                        # Running out of iterations reads like a finished answer
+                        # once only the transcript survives; say so out loud.
+                        logger.warning(
+                            "react loop hit the iteration limit of %d; "
+                            "asking for a conclusion with tools disabled",
+                            self._max_iterations,
+                        )
                         self._run_safety_handoff()
                 run_result = self._finalize()
                 self._mark_loop_span(loop_attrs)
@@ -362,6 +369,18 @@ class ReactLoop[RuntimeToolT: RuntimeTool]:
             )
         )
         model_name = str(getattr(self._llm, "model_id", None) or "invoke")
+        # The one chokepoint every LLM call in the product passes through, chat
+        # and investigation alike. Counts go to the runtime events and spans;
+        # what this adds is the identity of the model and, below, of the tools
+        # the model chose — which is what explains the shape of a turn.
+        logger.debug(
+            "llm request model=%s iteration=%d kind=%s messages=%d tools=%d",
+            model_name,
+            iteration,
+            request_kind,
+            len(provider_request.messages),
+            len(provider_request.tools or []),
+        )
         with llm_span(
             model_name,
             iteration=iteration,
@@ -379,6 +398,13 @@ class ReactLoop[RuntimeToolT: RuntimeTool]:
             span_attrs["tool_call_count"] = len(response.tool_calls)
             span_attrs["content_chars"] = len(response.content or "")
         response = self._host._after_response(provider_request, response)
+        logger.debug(
+            "llm response model=%s iteration=%d tools=[%s] content_chars=%d",
+            model_name,
+            iteration,
+            ", ".join(call.name for call in response.tool_calls),
+            len(response.content or ""),
+        )
         self._host._emit_runtime(
             ProviderRequestEndEvent(
                 iteration=iteration,
@@ -538,6 +564,11 @@ class ReactLoop[RuntimeToolT: RuntimeTool]:
             and self._stagnant_iterations >= self._max_stagnant_iterations
         ):
             self._stop_reason = "stagnation_limit"
+            logger.warning(
+                "react loop stopped: no new evidence for %d iterations (used %d)",
+                self._stagnant_iterations,
+                self._iterations_used,
+            )
             return _IterationResult(
                 should_stop=True,
                 outcome=self._stop_reason,
