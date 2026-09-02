@@ -349,6 +349,48 @@ OPENSRE_LOG_LEVEL=DEBUG uv run opensre        # 进程启动即生效
 /loglevel                                      # 查看当前级别
 ```
 
+**日志落在终端，不落文件**——除非你指定文件。全仓库没有任何默认的文件日志：
+交互 shell 走 Rich console（stdout），无 console 时兜底 stderr，gateway 独立进程走 stderr。
+`~/.opensre/sessions/*.jsonl` 和 `operations_log.jsonl` 是另外两套机制，**别把它们当成"只有计数"**：
+
+- `operations_log.jsonl` 确实只有生命周期事件的计数和耗时。
+- `sessions/*.jsonl` **存完整内容**——`append_message` 落 `role` + 整段 `content`，
+  `append_tool_call` 落工具的整个 `arguments` **和** `result`
+  （`core/agent_harness/session/persistence/memory.py:80, :100`）。
+  也就是说本节的日志 sink 特意只记参数名、还设成 `0600` 的那些东西，
+  会话文件里**早就有了，而且是 `0644`**。要收紧得单独处理，本节的改动管不到它。
+
+要留档就指定一个文件。文件**持有自己的级别**，所以可以屏幕干净、文件全量：
+
+```bash
+OPENSRE_LOG_FILE=~/opensre-debug.log \
+OPENSRE_LOG_FILE_LEVEL=DEBUG \
+uv run opensre                                 # 终端仍是默认 ERROR，文件记全量
+
+tail -f ~/opensre-debug.log
+```
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `OPENSRE_LOG_FILE` | 无 | **不设就完全不写盘**，也不建目录 |
+| `OPENSRE_LOG_FILE_LEVEL` | `DEBUG` | 独立于终端；`/loglevel` 和 `OPENSRE_LOG_LEVEL` 都不影响它 |
+
+两个变量都可以写进仓库根目录的 `.env`（在 `BootStep.ENV`，即启动第一步被读入，早于装 handler）。
+加载用 `override=False`，所以 **shell 里临时 `export` 的值优先于 `.env`**。
+`.env` 里配了也不影响测试：pytest / CI 下这个 sink 一律不装，免得每次跑测试都往工作区写文件。
+
+文件权限是 `0600`（DEBUG 下它装着工具入参和出站 URL），按 5 MB × 3 份滚动。
+路径解析失败、目录建不了、文件打不开——都只降级成终端日志并报一条 **ERROR**（不是 WARNING：
+终端 handler 默认就在 ERROR，WARNING 会被它自己丢掉），**不会让 shell 起不来**。
+装好之后磁盘才满、或滚动重命名失败，sink 会自我关闭并只抱怨一次。
+
+`/loglevel` 不带参数时会把**真正装上的**文件路径和级别报出来——不是读环境变量，
+所以打开失败时它不会骗你说在写。
+
+**只有交互 shell 装这个 sink**（`surfaces/interactive_shell/main.py` 是唯一调用方）。
+不带子命令的 `uv run opensre` 有；`opensre ask` / `opensre investigate` 这些纯 CLI 子命令**没有**，
+它们的日志只走终端。（`run_repl` 的 `initial_input` 参数没有任何生产调用方传值。）
+
 补在哪、记了什么：
 
 | 关键点 | 位置 | 日志 |
