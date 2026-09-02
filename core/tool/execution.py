@@ -335,6 +335,37 @@ def _unavailable_tool_message(name: str, tool_map: Mapping[str, Any]) -> str:
     )
 
 
+def _tool_input_summary(tool_input: Mapping[str, Any]) -> str:
+    """Name the arguments a call carried, keeping their free text out.
+
+    Redaction here is by key name, which cannot see a credential the model put
+    inside an ordinary field — a shell command, a connection string, a URL. A
+    number or a boolean cannot carry one, so those keep their value.
+    """
+    return ", ".join(
+        f"{key}={value}" if isinstance(value, bool | int | float) else str(key)
+        for key, value in tool_input.items()
+    )
+
+
+def _log_tool_call_start(
+    *, name: str, call_id: str, source: str, tool_input: dict[str, Any]
+) -> None:
+    """Record which tool ran and which arguments it was given.
+
+    The name alone cannot distinguish a call made with the right fields from
+    one that omitted the window or named the wrong metric. One line per record:
+    ``ShellLogHandler`` prints these while a Rich spinner animates.
+    """
+    logger.debug(
+        "tool_call start name=%s id=%s source=%s args=[%s]",
+        name,
+        call_id,
+        source,
+        _tool_input_summary(tool_input),
+    )
+
+
 def _execute_one_tool_call(
     tc: ToolCall,
     *,
@@ -383,7 +414,7 @@ def _execute_one_tool_call(
                 metadata={"tool_name": tc.name, **before.metadata},
             )
 
-        logger.debug("tool_call start name=%s id=%s source=%s", tc.name, tc.id, source)
+        _log_tool_call_start(name=tc.name, call_id=tc.id, source=source, tool_input=tc.input)
         raw = _invoke_runtime_tool(
             tool,
             tc,

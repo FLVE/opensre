@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -110,6 +111,15 @@ class SupportsIsConfigured(Protocol):
 type ReadOnlyQuery = Callable[..., dict[str, Any]]
 
 
+def _query_target(config: Any) -> str:
+    """Describe the server a diagnostic ran against, never its credentials."""
+    host = getattr(config, "host", None) or "?"
+    port = getattr(config, "port", None)
+    database = getattr(config, "database", None)
+    target = f"{host}:{port}" if port else str(host)
+    return f"{target}/{database}" if database else target
+
+
 def read_only_query[ConfigT: SupportsIsConfigured](
     *,
     integration: str,
@@ -140,14 +150,28 @@ def read_only_query[ConfigT: SupportsIsConfigured](
         def wrapper(config: ConfigT, /, *args: Any, **kwargs: Any) -> dict[str, Any]:
             if not config.is_configured:
                 return tool_unavailable(integration, "Not configured.")
+            # These integrations log nothing today: not which diagnostic ran,
+            # not which server answered, not how long it took. The SQL itself
+            # is static and greppable; the target and the timing are not.
+            target = _query_target(config)
+            logger.debug("%s query start %s target=%s", integration, fn.__name__, target)
+            started = time.monotonic()
             try:
                 conn = connect(config)
                 try:
                     with conn.cursor() as cursor:
-                        return fn(cursor, config, *args, **kwargs)
+                        result = fn(cursor, config, *args, **kwargs)
                 finally:
                     conn.close()
             except Exception as err:
+                logger.warning(
+                    "%s query failed %s target=%s after %dms: %s",
+                    integration,
+                    fn.__name__,
+                    target,
+                    int((time.monotonic() - started) * 1000),
+                    err,
+                )
                 report_validation_failure(
                     err,
                     logger=logger,
@@ -155,6 +179,14 @@ def read_only_query[ConfigT: SupportsIsConfigured](
                     method=fn.__name__,
                 )
                 return tool_unavailable(integration, str(err))
+            logger.debug(
+                "%s query done %s target=%s in %dms",
+                integration,
+                fn.__name__,
+                target,
+                int((time.monotonic() - started) * 1000),
+            )
+            return result
 
         return wrapper
 

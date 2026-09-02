@@ -177,6 +177,23 @@ def _build_and_cache_client(
     loki_uid = set_loki or discovered.get("loki_uid") or default_loki
     tempo_uid = set_tempo or discovered.get("tempo_uid") or default_tempo
     mimir_uid = set_mimir or discovered.get("mimir_uid") or default_mimir
+    # Discovery picks the `isDefault` datasource, which on an instance holding
+    # several Prometheus datasources is often not the one carrying the metrics
+    # in question. Which rung of the ladder won explains an empty result set
+    # faster than anything else available.
+    for kind, configured, uid in (
+        ("loki", set_loki, loki_uid),
+        ("tempo", set_tempo, tempo_uid),
+        ("mimir", set_mimir, mimir_uid),
+    ):
+        origin = (
+            "configured"
+            if configured
+            else "discovered"
+            if discovered.get(f"{kind}_uid")
+            else "default"
+        )
+        logger.debug("datasource %s uid=%s origin=%s", kind, uid or "-", origin)
 
     if loki_uid or tempo_uid or mimir_uid:
         config = GrafanaAccountConfig(

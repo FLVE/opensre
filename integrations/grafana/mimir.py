@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from typing import TYPE_CHECKING, Any
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
 
 # A bare Prometheus metric name is the only shape a trailing ``{label="v"}``
 # selector can legally be appended to.
+logger = logging.getLogger(__name__)
+
 _BARE_METRIC_NAME = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$")
 
 _MIN_STEP_SECONDS = 15
@@ -204,6 +207,18 @@ class MimirMixin:
             )
             params = {"query": query}
 
+        # The expression that left the process is the first thing anyone wants
+        # when a metric query comes back empty, and it appears in no event,
+        # span or transcript.
+        logger.debug(
+            "mimir query endpoint=%s uid=%s promql=%s window=%s→%s step=%s",
+            "query_range" if ranged else "query",
+            self.mimir_datasource_uid,
+            query,
+            params.get("start", "-"),
+            params.get("end", "-"),
+            params.get("step", "-"),
+        )
         try:
             data = self._make_get_request(url, params=params)
             result = data.get("data", {}).get("result", [])
@@ -226,6 +241,14 @@ class MimirMixin:
             if len(result) > MAX_SERIES:
                 payload["truncated_series"] = len(result) - MAX_SERIES
                 payload["truncation_hint"] = truncation_hint(MAX_SERIES, len(result))
+                # Dropping most of the series changes what the diagnosis rests
+                # on; the agent is told, and so is whoever reads the logs.
+                logger.info(
+                    "mimir query capped at %d of %d series for %s",
+                    MAX_SERIES,
+                    len(result),
+                    query,
+                )
             return payload
         except Exception as e:
             error_msg = str(e)
@@ -234,6 +257,9 @@ class MimirMixin:
                 response_text = e.response.text[:300]
                 error_msg = f"Mimir query failed: {e.response.status_code}"
 
+            # An expired token or a PromQL syntax error otherwise reaches only
+            # the model, as an `available: false` result nobody else ever sees.
+            logger.warning("mimir query failed promql=%s error=%s", query, error_msg)
             return {
                 "success": False,
                 "error": error_msg,
