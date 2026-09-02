@@ -155,25 +155,80 @@ def query_yc_metrics(
     }
 
 
+#: The shared response sanitizer caps any list at MAX_LIST_ITEMS and appends a
+#: sentence saying so as the final element. Harmless in a cluster listing;
+#: corrosive here, because discovery is the one place where absence is read as
+#: proof - and because Yandex ignores nameFilter, so the narrowing happens after
+#: the cut and cannot see what was removed.
+_TRUNCATION_MARKER = "more items truncated"
+
+
+def _has_more_pages(response: dict[str, Any]) -> bool:
+    """Whether Yandex kept a continuation token back for this read."""
+    return bool((response.get("metadata") or {}).get("next_page_token"))
+
+
+def _split_off_truncation(values: list[Any]) -> tuple[list[str], bool]:
+    """Return the real entries and whether the sanitizer dropped any."""
+    kept = [str(value) for value in values if _TRUNCATION_MARKER not in str(value)]
+    return kept, len(kept) != len(values)
+
+
+#: Enough to show the shape of a selector without filling the prompt.
+_SERIES_SAMPLE_SIZE = 3
+
+
+def _series_sample(client: YandexMonitoringClient, selectors: str) -> list[dict[str, Any]]:
+    """Return a few real series so a selector can be copied rather than guessed.
+
+    Label keys alone are not enough to build a query: the folder-wide key list
+    holds every key any service uses, so a caller reasonably picks ``cluster_id``
+    for a managed database - which publishes under ``resource_id`` instead. The
+    query then matches nothing, and matching nothing looks exactly like the
+    metric not being collected.
+
+    Only for a scoped call. Unscoped, Yandex answers with whichever series come
+    first across the whole folder, so a question about one service is shown
+    another one's labels - noise on every call, and misleading on the call where
+    the caller is deciding what to trust.
+    """
+    if not selectors.strip():
+        return []
+    response = client.metrics(selectors)
+    if not response.get("success"):
+        return []
+    listed = (response.get("data") or {}).get("metrics") or []
+    return [
+        {"name": entry.get("name", ""), "labels": entry.get("labels") or {}}
+        for entry in listed[:_SERIES_SAMPLE_SIZE]
+    ]
+
+
 @tool(
     name="list_yc_metrics",
     surfaces=(ToolSurface.INVESTIGATION, ToolSurface.ACTION),
     display_name="Yandex Monitoring",
     source=SOURCE,
     description=(
-        "Discover what metrics exist in the folder and which labels they carry. "
-        "Call before query_yc_metrics rather than guessing a metric name — "
-        "a query that matches nothing returns no series, not an error."
+        "Discover what metrics exist in the folder, which labels they carry, and "
+        "what those labels actually hold. Call before query_yc_metrics rather "
+        "than guessing — a query that matches nothing returns no series, not an "
+        "error, which reads exactly like the metric not being collected. Scope "
+        "with a service selector: managed databases publish under names and "
+        "labels of their own, so a name learned from one service rarely works "
+        "for another."
     ),
     use_cases=[
         "Finding the metric name for a resource type",
-        "Discovering which labels a metric can be filtered by",
+        "Discovering which labels a metric can be filtered by, and their values",
         "Checking whether a service reports metrics at all",
     ],
     requires=[],
     outputs={
         "names": "matching metric names",
         "labels": "label keys available under the given selectors",
+        "series_sample": "real series with their labels, when the call was scoped",
+        "complete": "false when the list was cut short, so absence proves nothing",
     },
     input_schema={
         "type": "object",
@@ -186,7 +241,10 @@ def query_yc_metrics(
             "selectors": {
                 "type": "string",
                 "description": (
-                    "Scope the search, e.g. 'service=\"compute\"'. Metrics the user "
+                    "Scope the search, e.g. 'service=\"compute\"' or "
+                    "'service=\"managed-greenplum\"'. Scoping is worth a call of its "
+                    "own: it is the only way to see which labels the service really "
+                    "uses. Metrics the user "
                     "pushes themselves live under 'service=\"custom\"' and are NOT in "
                     "the default listing — search there before concluding a metric "
                     "does not exist."
@@ -223,21 +281,42 @@ def list_yc_metrics(
         }
     labels_response = client.label_keys(selectors)
 
-    names = (names_response.get("data") or {}).get("names") or []
+    names, names_truncated = _split_off_truncation(
+        (names_response.get("data") or {}).get("names") or []
+    )
+    # Two different ways the answer can be partial, and only one of them leaves a
+    # marker: the sanitizer cuts at a hundred, while Yandex pages independently
+    # and can hand back a short page with a token for the rest.
+    names_truncated = names_truncated or _has_more_pages(names_response)
+    listed_before_filter = len(names)
     # Yandex accepts nameFilter and ignores it, so narrowing has to happen here —
     # otherwise every filter returns the same list and the caller retries forever.
     needle = name_filter.strip().lower()
     if needle:
         names = [name for name in names if needle in name.lower()]
-    labels = (labels_response.get("data") or {}).get("keys") or []
+    labels, labels_truncated = _split_off_truncation(
+        (labels_response.get("data") or {}).get("keys") or []
+    )
+    labels_truncated = labels_truncated or _has_more_pages(labels_response)
     result: dict[str, Any] = {
         "source": SOURCE,
         "available": True,
         "scope": selectors or 'default (Yandex services; excludes service="custom")',
         "names": names,
         "labels": labels,
+        "series_sample": _series_sample(client, selectors),
         "name_count": len(names),
+        "complete": not (names_truncated or labels_truncated),
     }
+    if names_truncated or labels_truncated:
+        # Said as a field and not only in prose: a caller that reads "complete:
+        # false" cannot conclude a metric is missing from this list, which is
+        # exactly the wrong turn discovery invites.
+        result["truncation_note"] = (
+            f"Only {listed_before_filter} names were returned, and there are more. A metric "
+            "absent from this list may still exist and be queryable - narrow with "
+            'selectors, e.g. service="managed-postgresql", and search again.'
+        )
     if not names and not selectors:
         # The most common reason for an empty result is scope, not absence.
         result["note"] = (

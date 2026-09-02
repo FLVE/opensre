@@ -540,7 +540,6 @@ jobs:
             pytest_paths: >-
               tests/e2e/openclaw
               tests/e2e/upstream_lambda
-              tests/e2e/upstream_prefect_ecs_fargate
               tests/e2e/upstream_apache_flink_ecs
               tests/e2e/kubernetes
 
@@ -765,7 +764,6 @@ jobs:
               - "tools/**"
               - "tests/e2e/cloudwatch_demo/**"
               - "tests/e2e/upstream_lambda/**"
-              - "tests/e2e/upstream_prefect_ecs_fargate/**"
               - "tests/e2e/upstream_apache_flink_ecs/**"
 
   test-thorough:
@@ -786,8 +784,6 @@ jobs:
             command: python3 -m tests.e2e.cloudwatch_demo.test_aws
           - name: upstream-lambda
             command: python3 -m tests.e2e.upstream_lambda.test_agent_e2e
-          - name: prefect-ecs-fargate
-            command: python3 -m tests.e2e.upstream_prefect_ecs_fargate.test_agent_e2e
           - name: flink-ecs
             command: python3 -m tests.e2e.upstream_apache_flink_ecs.test_agent_e2e
 

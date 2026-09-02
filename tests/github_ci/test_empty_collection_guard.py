@@ -36,6 +36,8 @@ _NOT_IN_PR_CI = (
     "tests/e2e/install",
     "tests/e2e/quickstart",
     "tests/e2e/kubernetes_local_alert_simulation",
+    # Deprecated live AWS demo; no longer part of CI.
+    "tests/e2e/upstream_prefect_ecs_fargate",
 )
 
 

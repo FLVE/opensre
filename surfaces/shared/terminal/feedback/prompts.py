@@ -40,11 +40,29 @@ _CHOICES: list[tuple[str, str]] = [
 
 _SKIP_KEYS = (b"s", b"S")
 
-# ANSI helpers (theme colours inlined to avoid import at module level)
-_HIGHLIGHT = "\x1b[1;38;2;185;237;175m"  # bold  (#B9EDAF)
+# Theme-independent ANSI attributes. The accent colour is read from the active
+# theme at render time in ``_run_select`` so it tracks theme changes.
 _DIM = "\x1b[2m"
 _RESET = "\x1b[0m"
 _HINT = f"  {_DIM}↑↓ / j k  ·  Enter  ·  Esc / s to skip{_RESET}"
+
+# ANSI cursor / line control, named so the render code reads as intent.
+_ERASE_LINE = "\r\x1b[2K"  # return to column 0, then clear the whole line
+_ERASE_TO_SCREEN_END = "\r\x1b[J"  # return to column 0, then clear everything below
+_NEWLINE = "\r\n"
+_SELECTED_MARKER = "  > "
+_UNSELECTED_MARKER = "    "  # same width as the selected marker, so rows align
+
+
+def _cursor_up(lines: int) -> str:
+    """ANSI escape that moves the cursor up *lines* rows."""
+    return f"\x1b[{lines}A"
+
+
+def _menu_row(label: str, *, selected: bool, accent: str) -> str:
+    """One erased menu row; the selected row gets a bold *accent* ``>`` marker."""
+    style, marker = (accent, _SELECTED_MARKER) if selected else (_DIM, _UNSELECTED_MARKER)
+    return f"{_ERASE_LINE}{style}{marker}{label}{_RESET}{_NEWLINE}"
 
 
 def _write_raw(text: str) -> None:
@@ -72,6 +90,8 @@ def _run_select(choices: list[tuple[str, str]]) -> str | None:
 
     Returns the selected key string, or None on Esc / Ctrl-C / s.
     """
+    from infrastructure.terminal.theme import PROMPT_ACCENT_ANSI
+
     restore_stdin_terminal()
     labels = [label for _, label in choices]
     n = len(labels)
@@ -88,13 +108,10 @@ def _run_select(choices: list[tuple[str, str]]) -> str | None:
 
     def _draw(redraw: bool) -> None:
         if redraw:
-            _out(f"\x1b[{total_lines}A")
+            _out(_cursor_up(total_lines))  # back to the top of the menu block
         for i, label in enumerate(labels):
-            if i == idx:
-                _out(f"\r\x1b[2K{_HIGHLIGHT}  > {label}{_RESET}\r\n")
-            else:
-                _out(f"\r\x1b[2K{_DIM}    {label}{_RESET}\r\n")
-        _out(f"\r\x1b[2K{_HINT}\r\n")
+            _out(_menu_row(label, selected=i == idx, accent=PROMPT_ACCENT_ANSI))
+        _out(f"{_ERASE_LINE}{_HINT}{_NEWLINE}")
 
     _draw(False)
 
@@ -106,11 +123,11 @@ def _run_select(choices: list[tuple[str, str]]) -> str | None:
         )
 
         if key == "enter":
-            _out(f"\x1b[{total_lines}A\r\x1b[J")
+            _out(_cursor_up(total_lines) + _ERASE_TO_SCREEN_END)  # wipe the menu
             return choices[idx][0]
 
         if key in ("cancel", "eof"):
-            _out(f"\x1b[{total_lines}A\r\x1b[J")
+            _out(_cursor_up(total_lines) + _ERASE_TO_SCREEN_END)  # wipe the menu
             return None
 
         if key == "up":

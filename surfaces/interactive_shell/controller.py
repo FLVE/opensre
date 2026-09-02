@@ -292,6 +292,17 @@ class InteractiveShellController:
                     # round counter so the two-round cap is per-request, not per-session.
                     self.session.ask_user_rounds = 0
                     self.session.terminal.pending_choice_response = None
+                    # Clear a finished plan left pinned after the previous turn so
+                    # it does not linger over this one. An unfinished plan stays:
+                    # the operator may continue it or type ``go`` while idle.
+                    # A still-running dispatch keeps its plan even when complete.
+                    plan = self.session.task_plan
+                    if (
+                        plan is not None
+                        and plan.all_completed
+                        and not self.state.is_dispatch_running()
+                    ):
+                        self.session.task_plan = None
                 wait_for_turn = _should_wait_until_turn_finishes(
                     exclusive_stdin=wait,
                     goal_condition_autosubmitted=autosubmitted and not ask_user_answers,

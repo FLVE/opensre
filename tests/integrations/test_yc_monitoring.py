@@ -135,12 +135,18 @@ class TestMetricReads:
         assert called["n"] == 0
 
 
-def _discovery_responder(names: list[str], keys: list[str]) -> Any:
-    """Return a request stand-in answering the two discovery endpoints."""
+def _discovery_responder(
+    names: list[str], keys: list[str], series: list[dict[str, Any]] | None = None
+) -> Any:
+    """Return a request stand-in answering the three discovery endpoints."""
 
     def _request(_method: str, url: str, **_kwargs: Any) -> httpx.Response:
         if "/names" in url:
             return httpx.Response(HTTPStatus.OK, json={"names": names})
+        if "/labels" in url:
+            return httpx.Response(HTTPStatus.OK, json={"keys": keys})
+        if url.rstrip("/").endswith("/metrics"):
+            return httpx.Response(HTTPStatus.OK, json={"metrics": series or []})
         return httpx.Response(HTTPStatus.OK, json={"keys": keys})
 
     return _request
@@ -221,3 +227,184 @@ class TestTheQueryLanguageIsDocumented:
 
         assert "folder_id" in description
         assert "folderId" in description
+
+
+class TestDiscoveryShowsWhatALabelActuallyHolds:
+    """Label keys alone are not enough to build a query, and guessing costs a turn.
+
+    The folder-wide key list holds every key any service uses, so a caller
+    reasonably picks ``cluster_id`` for a managed database - which publishes
+    under ``resource_id``. The query then matches nothing, and matching nothing
+    is indistinguishable from the metric not being collected.
+    """
+
+    _SERIES = [
+        {
+            "name": "cpu.idle",
+            "labels": {
+                "service": "managed-postgresql",
+                "resource_id": "highload-demo",
+                "host": "rc1a-aaa.mdb.yandexcloud.net",
+                "node": "primary",
+            },
+        },
+        {
+            "name": "disk.wal_size",
+            "labels": {"service": "managed-postgresql", "resource_id": "highload-demo"},
+        },
+    ]
+
+    def test_real_series_come_back_with_their_labels(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "integrations.yandex_cloud.rest_client.send_request",
+            _discovery_responder(["cpu.idle"], ["service", "cluster_id"], self._SERIES),
+        )
+
+        result = list_yc_metrics(selectors='service="managed-postgresql"', **_CREDENTIALS)
+
+        assert result["series_sample"][0]["name"] == "cpu.idle"
+        assert result["series_sample"][0]["labels"]["resource_id"] == "highload-demo"
+
+    def test_the_sample_is_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A folder holds thousands of series; the point is the shape, not the list."""
+        many = [{"name": f"m{index}", "labels": {"host": "h"}} for index in range(50)]
+        monkeypatch.setattr(
+            "integrations.yandex_cloud.rest_client.send_request",
+            _discovery_responder(["m0"], ["host"], many),
+        )
+
+        result = list_yc_metrics(selectors='service="managed-greenplum"', **_CREDENTIALS)
+
+        assert len(result["series_sample"]) == 3
+
+    def test_an_unscoped_call_samples_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unscoped, the series come from whatever service answers first.
+
+        Showing a Valkey series to a question about Greenplum is worse than
+        showing none: it is noise on every call, and misleading on the call
+        where the caller is deciding which labels to trust.
+        """
+        elsewhere = [{"name": "n_users", "labels": {"service": "managed-redis"}}]
+        monkeypatch.setattr(
+            "integrations.yandex_cloud.rest_client.send_request",
+            _discovery_responder(["cpu.idle"], ["host"], elsewhere),
+        )
+
+        result = list_yc_metrics(name_filter="greenplum", **_CREDENTIALS)
+
+        assert result["series_sample"] == []
+
+    def test_a_service_with_no_series_says_so_with_an_empty_sample(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "integrations.yandex_cloud.rest_client.send_request",
+            _discovery_responder(["cpu.idle"], ["service"], []),
+        )
+
+        result = list_yc_metrics(selectors='service="managed-redis"', **_CREDENTIALS)
+
+        assert result["series_sample"] == []
+
+
+class TestDiscoverySaysWhenItWasCutShort:
+    """Discovery is the one place where absence gets read as proof.
+
+    The shared sanitizer caps any list at a hundred and appends a sentence
+    saying so. That sentence then sits in ``names`` looking like a metric, the
+    count is off by one, and - because Yandex ignores ``nameFilter`` and the
+    narrowing happens locally, after the cut - a search cannot see what was
+    removed. So a metric that exists and is queryable reads as missing.
+    """
+
+    _CUT = [f"metric.{index}" for index in range(100)] + ["... (413 more items truncated)"]
+
+    def test_the_marker_is_not_offered_as_a_metric_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "integrations.yandex_cloud.rest_client.send_request",
+            _discovery_responder(self._CUT, ["host"]),
+        )
+
+        result = list_yc_metrics(**_CREDENTIALS)
+
+        assert all("truncated" not in name for name in result["names"])
+        assert result["name_count"] == 100
+
+    def test_an_incomplete_list_says_so(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "integrations.yandex_cloud.rest_client.send_request",
+            _discovery_responder(self._CUT, ["host"]),
+        )
+
+        result = list_yc_metrics(**_CREDENTIALS)
+
+        assert result["complete"] is False
+        assert "may still exist" in result["truncation_note"]
+
+    def test_a_filtered_search_over_a_cut_list_still_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The filter runs after the cut, so a match count says nothing about the rest."""
+        monkeypatch.setattr(
+            "integrations.yandex_cloud.rest_client.send_request",
+            _discovery_responder(self._CUT, ["host"]),
+        )
+
+        result = list_yc_metrics(name_filter="metric.9", **_CREDENTIALS)
+
+        assert result["complete"] is False
+        assert result["names"]
+
+    def test_a_complete_list_makes_no_excuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "integrations.yandex_cloud.rest_client.send_request",
+            _discovery_responder(["cpu.idle"], ["host"]),
+        )
+
+        result = list_yc_metrics(**_CREDENTIALS)
+
+        assert result["complete"] is True
+        assert "truncation_note" not in result
+
+
+class TestAPageTokenCountsAsIncomplete:
+    """Two ways to be partial, and only one leaves a marker in the list.
+
+    Yandex pages independently of the sanitizer, so a short page with a
+    continuation token holds fewer than a hundred names and no marker at all -
+    and reporting that as complete is how an existing metric gets called
+    missing.
+    """
+
+    def _with_token(self, names: list[str]) -> Any:
+        def _request(_method: str, url: str, **_kwargs: Any) -> httpx.Response:
+            if "/names" in url:
+                return httpx.Response(HTTPStatus.OK, json={"names": names, "nextPageToken": "more"})
+            return httpx.Response(HTTPStatus.OK, json={"keys": ["host"]})
+
+        return _request
+
+    def test_a_short_page_with_a_token_is_not_complete(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "integrations.yandex_cloud.rest_client.send_request",
+            self._with_token(["cpu.idle", "cpu.user"]),
+        )
+
+        result = list_yc_metrics(**_CREDENTIALS)
+
+        assert result["complete"] is False
+        assert "there are more" in result["truncation_note"]
+
+    def test_no_token_and_no_marker_is_complete(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "integrations.yandex_cloud.rest_client.send_request",
+            _discovery_responder(["cpu.idle"], ["host"]),
+        )
+
+        result = list_yc_metrics(**_CREDENTIALS)
+
+        assert result["complete"] is True
