@@ -16,6 +16,11 @@ from config.constants.logging import OPENSRE_LOG_LEVEL_ENV
 
 DEFAULT_LOG_LEVEL = logging.ERROR
 
+#: Marks a handler that holds its own level. ``set_log_level`` leaves it alone,
+#: so a file sink stays at DEBUG while the terminal is raised to ERROR. An
+#: attribute rather than a type check: the file handler imports this module.
+FIXED_LEVEL_ATTR = "opensre_fixed_level"
+
 
 def parse_log_level(value: str) -> int | None:
     """Return the level ``value`` names, or ``None`` when it names none.
@@ -53,19 +58,29 @@ def resolve_log_level() -> int:
 
 
 def set_log_level(level: int) -> None:
-    """Lower the root logger and its handlers to ``level``.
+    """Set the terminal's level on the root logger and the handlers it steers.
 
     Both are needed: a handler admitting DEBUG sees nothing while the root
     logger still filters at WARNING.
+
+    A handler marked with :data:`FIXED_LEVEL_ATTR` keeps its own floor, and the
+    root logger drops to the lowest floor still wanted — otherwise raising the
+    terminal to ERROR would silence a file sink deliberately left at DEBUG,
+    since the root logger filters before any handler runs.
     """
     root = logging.getLogger()
-    root.setLevel(level)
+    floors = [level]
     for handler in root.handlers:
-        handler.setLevel(level)
+        if getattr(handler, FIXED_LEVEL_ATTR, False):
+            floors.append(handler.level)
+        else:
+            handler.setLevel(level)
+    root.setLevel(min(floors))
 
 
 __all__ = [
     "DEFAULT_LOG_LEVEL",
+    "FIXED_LEVEL_ATTR",
     "configured_log_level",
     "parse_log_level",
     "resolve_log_level",

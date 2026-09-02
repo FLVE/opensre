@@ -25,7 +25,13 @@ from config.llm_reasoning_effort import (
     parse_reasoning_effort,
     provider_supports_reasoning_effort,
 )
-from infrastructure.logging import ShellLogHandler, parse_log_level, set_log_level
+from infrastructure.logging import (
+    ShellLogHandler,
+    installed_log_file,
+    log_file_level,
+    parse_log_level,
+    set_log_level,
+)
 from surfaces.interactive_shell.command_registry.types import SlashCommand
 from surfaces.interactive_shell.runtime import Session
 from surfaces.interactive_shell.ui import (
@@ -231,6 +237,14 @@ def _cmd_loglevel(_session: Session, console: Console, args: list[str]) -> bool:
         console.print(
             f"[{HIGHLIGHT}]log level: {logging.getLevelName(_effective_log_level(root))}[/]"
         )
+        # The sink that is really installed, not the one that was asked for:
+        # the path can be configured and the open still have failed.
+        log_file = installed_log_file()
+        if log_file is not None:
+            # The file keeps its own level, so nothing else on screen reveals
+            # that a fuller record is being written, or where.
+            file_level = logging.getLevelName(log_file_level())
+            console.print(f"[{DIM}]also writing {file_level} to {escape(str(log_file))}[/]")
         console.print(f"[{DIM}]set with /loglevel <debug|info|warning|error>[/]")
         return True
 

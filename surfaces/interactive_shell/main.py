@@ -13,6 +13,7 @@ from core.agent_harness import SessionManager
 from infrastructure.analytics.github_identity import identify_saved_github_username
 from infrastructure.logging import (
     configured_log_level,
+    install_file_log_handler,
     install_shell_log_handler,
     quiet_noisy_third_party_loggers,
     resolve_log_level,
@@ -62,6 +63,10 @@ async def run_repl_async(
     # OPENSRE_LOG_LEVEL opens the handler and the root logger together; without
     # both, the codebase's debug/info records never reach an operator.
     install_shell_log_handler(lambda: out, level=resolve_log_level())
+    # After the shell handler, never before: that one skips a root logger that
+    # already has handlers, so installing the file sink first leaves the
+    # terminal with none.
+    install_file_log_handler()
     # Only on an explicit request: install_shell_log_handler leaves an embedding
     # host's root handlers alone, and lowering the root logger unconditionally
     # would override that host's configuration process-wide, past REPL exit.
