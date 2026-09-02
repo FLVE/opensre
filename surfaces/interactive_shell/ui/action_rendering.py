@@ -19,25 +19,27 @@ import shlex
 from typing import Any
 
 from rich.console import Console
-from rich.padding import Padding
-from rich.syntax import Syntax
 from rich.text import Text
 
 from core.agent_harness.spi.accounting import SELF_RECORDING_ACTION_TOOL_NAMES
 from core.agent_harness.spi.task_plan import is_plan_diagnosis_prose
 from infrastructure.observability.trace.redaction import redact_sensitive
 from infrastructure.safety.terminal_output import strip_terminal_controls
-from infrastructure.terminal.theme import BOLD_SKILL, BRAND, DIM, HIGHLIGHT, MARKDOWN_CODE_THEME
+from infrastructure.terminal.theme import BOLD_SKILL, BRAND, DIM, HIGHLIGHT, SECONDARY
 from surfaces.interactive_shell.runtime import Session
 from surfaces.interactive_shell.runtime.core.state import SpinnerState
 from surfaces.interactive_shell.ui.streaming import render_note_block
 from surfaces.shared.terminal.output.console_state import get_investigation_spinner
+from surfaces.shared.terminal.tables import print_command_output
 from tools.interactive_shell.action_names import ActionToolName
 from tools.interactive_shell.shell.display import format_shell_command_for_display
 
-# Tool labels whose payload is a runnable command: render it as a highlighted
-# shell code block rather than plain inline text.
+# Tool labels whose payload is a runnable command.
 _COMMAND_TOOL_LABELS: frozenset[str] = frozenset({"Execute", "GitHub CLI", "opensre"})
+
+# Leads every tool-call line so a call reads apart from the ``∴`` reply and the
+# ``[n] ❯`` user row — the call → result → reply hierarchy Claude Code / Droid use.
+_TOOL_CALL_MARKER = "⏺"
 
 # Tools whose preview is just ``(label, single-arg)``. The display content is the
 # stripped string value of that single argument. Anything that needs to combine
@@ -123,6 +125,58 @@ def _bounded_preview(value: str, *, limit: int = _TOOL_PREVIEW_MAX_CHARS) -> str
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: limit - 1].rstrip() + "…"
+
+
+def _is_result_data_blob(text: str) -> bool:
+    """True when *text* is a JSON/record blob the reply will summarize.
+
+    Same shape test the action driver uses to hide ``gh api`` payloads: opens
+    an object/array, or is dense with ``":`` key separators.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped[0] in "{[":
+        return True
+    return stripped.count('":') >= 2
+
+
+def _preview_from_result_fields(payload: dict[str, Any]) -> str:
+    """Pull the one user-facing field from a tool-result dict, or empty."""
+    for key in ("response_text", "summary"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip() and not _is_result_data_blob(value):
+            return value.strip()
+    stdout = payload.get("stdout")
+    if (
+        payload.get("ok")
+        and isinstance(stdout, str)
+        and stdout.strip()
+        and not _is_result_data_blob(stdout)
+    ):
+        return stdout.strip()
+    error = payload.get("error")
+    if error:
+        return str(error).strip()
+    return ""
+
+
+def _tool_result_preview(output: object) -> str:
+    """User-facing result text for a ``↳`` child, or empty for model-only data."""
+    if isinstance(output, dict):
+        return _preview_from_result_fields(output)
+    details = getattr(output, "details", None)
+    if isinstance(details, dict):
+        preview = _preview_from_result_fields(details)
+        if preview:
+            return preview
+    if isinstance(output, str):
+        stripped = output.strip()
+        return "" if not stripped or _is_result_data_blob(stripped) else stripped
+    content = getattr(output, "content", None)
+    if isinstance(content, str) and content.strip() and not _is_result_data_blob(content):
+        return content.strip()
+    return ""
 
 
 def _is_sensitive_key(key: object) -> bool:
@@ -337,6 +391,7 @@ class ActionRenderObserver:
         self.message = message
         self.planned_count = 0
         self._pending_skill_calls: dict[str, str] = {}
+        self._pending_result_tools: set[str] = set()
 
     def __call__(self, kind: str, data: dict[str, Any]) -> None:
         if kind == "llm_start":
@@ -359,6 +414,9 @@ class ActionRenderObserver:
             name = str(data.get("name", "")).strip()
             if name == ActionToolName.SKILL_VIEW:
                 self._render_skill_end(data)
+            elif _tool_event_id(data) in self._pending_result_tools:
+                self._render_tool_result(data)
+            self._pending_result_tools.discard(_tool_event_id(data))
             # update_plan is not painted into the transcript: the plan renders in
             # the pinned bottom overlay (``task_plan_overlay_ansi``) from session
             # state the tool committed.
@@ -382,6 +440,7 @@ class ActionRenderObserver:
             pass  # owns its UI; a generic preview would duplicate it
         else:
             self._render_tool_invocation(name, data)
+            self._pending_result_tools.add(_tool_event_id(data))
         if name not in _SKIP_PLAN_WORK_TOOLS and not _is_internal_choice_command(name, data):
             self._record_plan_work(name, data)
             self._set_active_action(name, data)
@@ -487,42 +546,51 @@ class ActionRenderObserver:
         self.console.print(line)
 
     def _render_tool_invocation(self, name: str, data: dict[str, Any]) -> None:
-        """Show the running tool: orange verb, then payload."""
+        """Show the running tool as one marked line: ``⏺ Label · payload``."""
         args = data.get("input")
         label, content = tool_call_display(name, args if isinstance(args, dict) else {})
         self.console.print()
-        if content and label in _COMMAND_TOOL_LABELS:
-            # A runnable command reads as code: label line, then a syntax-
-            # highlighted shell block indented under it.
-            self.console.print(Text(label, style=str(HIGHLIGHT)))
-            self.console.print(
-                Padding(
-                    Syntax(
-                        content,
-                        "bash",
-                        theme=MARKDOWN_CODE_THEME,
-                        background_color="default",
-                        word_wrap=True,
-                    ),
-                    (0, 0, 0, 2),
-                )
-            )
-            return
+        # One line per call, led by ``⏺``: the label reads as the action and the
+        # payload (command / args) as its detail. A command tool separates the two
+        # with ``·`` so ``⏺ GitHub CLI · gh api …`` reads as a single unit.
         line = Text()
-        line.append(label, style=str(HIGHLIGHT))
+        line.append(f"{_TOOL_CALL_MARKER} ", style=str(HIGHLIGHT))
+        line.append(label, style=f"bold {HIGHLIGHT}")
         if content:
-            line.append(f" {content}", style=str(BRAND))
+            separator = " · " if label in _COMMAND_TOOL_LABELS else " "
+            line.append(separator, style=str(DIM))
+            line.append(content, style=str(BRAND))
         self.console.print(line)
 
+    def _render_tool_result(self, data: dict[str, Any]) -> None:
+        """Nest the user-facing result under the ``⏺`` call as a ``↳`` child.
+
+        Droid / Claude Code / Cursor keep the result attached to the call.
+        JSON blobs stay hidden — the closing reply summarizes those.
+        """
+        preview = _tool_result_preview(data.get("output"))
+        if not preview:
+            return
+        print_command_output(
+            self.console,
+            preview,
+            style=str(SECONDARY),
+            on_collapse=lambda body: setattr(self.session.terminal, "collapsed_tool_output", body),
+        )
+        self.session.terminal.inline_tool_results = True
+
     def _render_skill_end(self, data: dict[str, Any]) -> None:
-        """Print the ``↳`` child line under the skill's ``tool_start`` parent."""
+        """Print the ``↳`` child line under the skill's ``tool_start`` parent.
+
+        The next block (another call, a note, or the ``∴`` reply) opens with
+        its own blank line — do not add one here or the gap doubles.
+        """
         if self._pending_skill_calls.pop(str(data.get("id") or ""), None) is None:
             return
         output = data.get("output")
         activated = isinstance(output, dict) and bool(output.get("ok"))
         label = "Skill activated" if activated else "Skill failed to load"
         self.console.print(Text(f"  ↳ {label}", style=DIM))
-        self.console.print()
 
 
 __all__ = [

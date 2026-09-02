@@ -13,6 +13,7 @@ import infrastructure.terminal.theme as ui_theme
 from core.agent_harness.spi.prompt_chrome import normalize_three_tier_spacing
 from core.agent_harness.spi.session_goal import strip_session_goal_progress_tags
 from infrastructure.safety.terminal_output import strip_terminal_controls
+from infrastructure.text import looks_like_data_blob
 
 if TYPE_CHECKING:
     from rich.markdown import Markdown
@@ -29,6 +30,69 @@ _DUNDER_FILENAME_RE = re.compile(r"__([A-Za-z0-9_]+)__(?=\.py\b)")
 def _escape_markdown_dunder_filenames(text: str) -> str:
     """Neutralize ``__name__.py`` so Markdown does not parse it as strong emphasis."""
     return _DUNDER_FILENAME_RE.sub(r"\_\_\1\_\_", text)
+
+
+# The model sometimes pastes a tool's raw result (JSON, listings) into its reply
+# instead of answering in prose. Collapse such a block to a compact marker so the
+# reply reads like Claude Code / Droid, regardless of which model echoed it.
+_DUMP_TRUNCATED_MARKER = "output truncated"
+_DUMP_MIN_CHARS = 200
+_DUMP_MIN_JSON_KEYS = 3
+_DUMP_STRUCTURAL_RATIO = 0.15
+# Line-start fences only — matches the streaming splitter so an inline
+# ``Use ``` to fence code`` mention does not freeze dump collapsing.
+_FENCE_LINE_RE = re.compile(r"^```", re.MULTILINE)
+
+
+def _looks_like_raw_dump(text: str) -> bool:
+    """Whether a paragraph in the model's reply is an echoed tool result.
+
+    Conservative by design: a paragraph collapses only when it is large and
+    dense (or carries the ``output truncated`` marker), so real prose is never
+    mistaken for a dump. The tool-result hider in ``display_text`` runs the same
+    mechanism with a smaller floor, since a raw payload is always data.
+    """
+    return looks_like_data_blob(
+        text,
+        min_chars=_DUMP_MIN_CHARS,
+        min_json_keys=_DUMP_MIN_JSON_KEYS,
+        structural_ratio=_DUMP_STRUCTURAL_RATIO,
+        truncation_marker=_DUMP_TRUNCATED_MARKER,
+    )
+
+
+def _collapse_paragraph(paragraph: str) -> str:
+    """Collapse *paragraph* to a marker when it is a raw dump, else return it."""
+    stripped = paragraph.strip()
+    if not _looks_like_raw_dump(stripped):
+        return paragraph
+    lines = stripped.count("\n") + 1
+    noun = "line" if lines == 1 else "lines"
+    return f"_[tool output omitted — {lines} {noun}]_"
+
+
+def _collapse_raw_dumps(text: str) -> str:
+    """Replace echoed raw tool-output paragraphs with a one-line marker.
+
+    Fenced regions stay intact — a fence means the model meant to show them.
+    Independent paragraphs still collapse, including when they sit beside a
+    fence in the same reply. Works per blank-line-separated paragraph so a
+    summary sentence beside a pasted blob keeps the summary and collapses
+    only the blob, whether the reply arrives whole (finalize path) or
+    paragraph-by-paragraph (streaming).
+    """
+    parts = re.split(r"\n[ \t]*\n", text)
+    collapsed: list[str] = []
+    inside_fence = False
+    for part in parts:
+        fence_count = len(_FENCE_LINE_RE.findall(part))
+        if inside_fence or fence_count:
+            collapsed.append(part)
+        else:
+            collapsed.append(_collapse_paragraph(part))
+        if fence_count % 2:
+            inside_fence = not inside_fence
+    return "\n\n".join(collapsed)
 
 
 def _build_markdown_block(text: str) -> Markdown:
@@ -49,6 +113,7 @@ def _build_markdown_block(text: str) -> Markdown:
     assert __package__  # always set for a package submodule
     package = sys.modules[__package__]
     safe = strip_terminal_controls(text, keep_whitespace=True)
+    safe = _collapse_raw_dumps(safe)
     spaced = normalize_three_tier_spacing(safe)
     return package.Markdown(  # type: ignore[no-any-return]
         _escape_markdown_dunder_filenames(spaced.rstrip()),

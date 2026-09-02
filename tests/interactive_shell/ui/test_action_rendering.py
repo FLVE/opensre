@@ -154,7 +154,7 @@ def test_skill_view_renders_activation_event() -> None:
         },
     )
 
-    assert buffer.getvalue() == "\nSkill install-code-review\n  ↳ Skill activated\n\n"
+    assert buffer.getvalue() == "\nSkill install-code-review\n  ↳ Skill activated\n"
 
 
 def test_skill_view_renders_bold_green_skill_label() -> None:
@@ -352,7 +352,7 @@ def test_skill_view_failure_renders_failure_child() -> None:
         },
     )
 
-    assert buffer.getvalue() == "\nSkill no-such-skill\n  ↳ Skill failed to load\n\n"
+    assert buffer.getvalue() == "\nSkill no-such-skill\n  ↳ Skill failed to load\n"
 
 
 def test_skill_view_tool_end_without_start_prints_nothing() -> None:
@@ -424,8 +424,81 @@ def test_non_skill_tool_end_prints_nothing() -> None:
         {"id": "t1", "name": "shell_run", "input": {"command": "true"}, "output": {"ok": True}},
     )
 
-    # tool_end adds a child line only for skill_view; a non-skill tool_end is silent.
+    # Self-rendering tools (shell_run) already printed ``$ cmd`` + output;
+    # a generic tool_end child would duplicate that block.
     assert buffer.getvalue() == after_start
+
+
+def test_generic_tool_end_nests_the_result_under_the_call() -> None:
+    """Droid / Claude Code / Cursor attach the result to the call as a ``↳`` child."""
+    observer, buffer = _observer_with_buffer()
+
+    observer(
+        "tool_start",
+        {"id": "t1", "name": "github_cli", "input": {"args": ["api", "user"]}},
+    )
+    observer(
+        "tool_end",
+        {
+            "id": "t1",
+            "name": "github_cli",
+            "output": {"ok": True, "summary": "GitHub API call succeeded."},
+        },
+    )
+
+    out = buffer.getvalue()
+    assert "GitHub CLI" in out
+    assert "\n  ↳ GitHub API call succeeded" in out  # tight child, 2-space gutter
+    assert "\n\n  ↳" not in out  # no blank inside the block
+    assert observer.session.terminal.inline_tool_results is True
+
+
+def test_generic_tool_end_hides_a_json_blob() -> None:
+    """A ``gh api`` payload is for the model — nest nothing, leave the reply to summarize."""
+    observer, buffer = _observer_with_buffer()
+
+    observer(
+        "tool_start",
+        {"id": "t1", "name": "github_cli", "input": {"args": ["api", "user"]}},
+    )
+    after_start = buffer.getvalue()
+    observer(
+        "tool_end",
+        {
+            "id": "t1",
+            "name": "github_cli",
+            "output": {"ok": True, "stdout": '{"login":"Tracer-Cloud"}'},
+        },
+    )
+
+    assert buffer.getvalue() == after_start
+    assert observer.session.terminal.inline_tool_results is False
+
+
+def test_one_blank_line_between_a_skill_block_and_the_next_call() -> None:
+    """Droid / Claude / Cursor: one gap BETWEEN blocks, never two stacked blanks."""
+    observer, buffer = _observer_with_buffer()
+
+    observer(
+        "tool_start",
+        {"id": "s1", "name": "skill_view", "input": {"name": "install_code_review"}},
+    )
+    observer(
+        "tool_end",
+        {
+            "id": "s1",
+            "name": "skill_view",
+            "output": {"ok": True, "name": "install-code-review"},
+        },
+    )
+    observer(
+        "tool_start",
+        {"id": "t1", "name": "github_cli", "input": {"args": ["api", "user"]}},
+    )
+
+    out = buffer.getvalue()
+    assert "\nSkill install-code-review\n  ↳ Skill activated\n\n⏺" in out
+    assert "\n\n\n" not in out
 
 
 def test_literal_slash_command_records_single_history_entry(

@@ -42,6 +42,15 @@ from core.agent_harness.session.pending_choice import parse_ask_user_answers
 from core.agent_harness.session.terminal_access import execute_cli_onboard_on_missing_key
 from core.agent_harness.session_goal.goal import strip_session_goal_progress_tags
 from core.agent_harness.turns.conversation_recording import record_conversation_turn
+from core.agent_harness.turns.display_text import (
+    cap_for_display,
+    format_generic_tool_payload,
+    is_data_blob,
+    looks_like_json,
+    preferred_tool_response_text,
+    split_output_truncation_markers,
+    strip_plan_snapshots,
+)
 from core.agent_harness.turns.goal_review import (
     build_goal_reviewer,
     tap_executed_tool_names,
@@ -226,15 +235,12 @@ _EXECUTED_HISTORY_TYPES = {
 INVESTIGATION_DISPATCH_TOOL_NAMES: frozenset[str] = frozenset(
     {"investigation_start", "alert_sample"}
 )
+
+
 # Tools whose user-facing event is owned by the host UI, so the end-of-turn
 # generic formatter must stay silent: repeating their summary would double-print,
 # and their payload (e.g. the full skill body) is for the model only. update_plan
 # renders as the pinned plan overlay, so its summary must not also print as text.
-_HOST_RENDERED_TOOL_NAMES: frozenset[str] = frozenset(
-    {"ask_user_choice", "skill_view", "update_plan"}
-)
-
-
 @dataclass(frozen=True)
 class ActionTurnPlan:
     agent: Agent[Any]
@@ -325,14 +331,6 @@ def _pop_turn_outcome_hint(session: SessionState) -> str:
     return hint.strip() if isinstance(hint, str) else ""
 
 
-def _content_to_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return json.dumps(content, default=str)
-    return str(content)
-
-
 def _generic_tool_results(result: Any) -> list[tuple[ToolCall, Any]]:
     return [
         (tool_call, tool_result)
@@ -341,136 +339,17 @@ def _generic_tool_results(result: Any) -> list[tuple[ToolCall, Any]]:
     ]
 
 
-_DISPLAY_OUTPUT_MAX_LINES = 12
-_DISPLAY_OUTPUT_MAX_CHARS = 800
-_OUTPUT_TRUNCATED_MARKER = "… (output truncated)"
-
-
-_PLAN_SNAPSHOT_RE = re.compile(r"Plan\s*[·.]\s*\d+\s*/\s*\d+(?:\s*[✓●○][^✓●○\n]*)*")
-
-
-def _strip_plan_snapshots(text: str) -> str:
-    """Remove ``Plan · n/m`` checklist snapshots the model restates in its reply.
-
-    The plan lives in the pinned overlay, so echoing it — let alone every
-    historical step-completion state — is a redundant wall. Prose (``-``/``•``
-    bullets, sentences) is untouched."""
-    if "Plan" not in text:
-        return text
-    cleaned = _PLAN_SNAPSHOT_RE.sub("", text)
-    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-
-
-def _looks_like_json(text: str) -> bool:
-    stripped = text.strip()
-    if not stripped or stripped[0] not in "[{":
-        return False
-    try:
-        json.loads(stripped)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False
-    return True
-
-
-def _cap_for_display(text: str) -> str:
-    """Cap verbose tool output for the console so a large result cannot flood the
-    transcript. The model and persisted history keep the full text; only the
-    user-facing preview is truncated."""
-    if not text:
-        return text
-    lines = text.splitlines()
-    capped = "\n".join(lines[:_DISPLAY_OUTPUT_MAX_LINES])
-    truncated = len(lines) > _DISPLAY_OUTPUT_MAX_LINES
-    if len(capped) > _DISPLAY_OUTPUT_MAX_CHARS:
-        capped = capped[:_DISPLAY_OUTPUT_MAX_CHARS].rstrip()
-        truncated = True
-    return f"{capped}\n{_OUTPUT_TRUNCATED_MARKER}" if truncated else capped
-
-
-def _visible_stdout(stdout: str) -> str:
-    """Plain-text stdout is shown as-is; a JSON payload (e.g. a ``gh api``
-    response) is pretty-printed so it reads as formatted data, not a one-line
-    blob. Capping and fenced-block styling happen later, at display time."""
-    stripped = stdout.strip()
-    if not stripped:
-        return ""
-    try:
-        parsed = json.loads(stripped)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return stripped
-    return json.dumps(parsed, indent=2, ensure_ascii=False)
-
-
-def _format_generic_tool_payload(tool_call: ToolCall, tool_result: Any) -> str:
-    """Build a user-visible summary for one non-self-recording tool result."""
-    if tool_call.name in _HOST_RENDERED_TOOL_NAMES and not getattr(tool_result, "is_error", False):
-        return ""
-    preferred_response = _preferred_tool_response_text(tool_result)
-    if preferred_response:
-        return preferred_response
-    details = getattr(tool_result, "details", None)
-    if isinstance(details, dict):
-        summary = details.get("summary")
-        if isinstance(summary, str) and summary.strip():
-            return summary.strip()
-        stdout = details.get("stdout")
-        if details.get("ok") and isinstance(stdout, str) and stdout.strip():
-            return _visible_stdout(stdout)
-        error = details.get("error")
-        if error:
-            return str(error).strip()
-    if getattr(tool_result, "is_error", False):
-        return ""
-    content = _content_to_text(getattr(tool_result, "content", "")).strip()
-    if not content:
-        return ""
-    # Prefer a nested summary when the tool returned a JSON object payload.
-    try:
-        parsed = json.loads(content)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        parsed = None
-    if isinstance(parsed, dict):
-        response_text = parsed.get("response_text")
-        if isinstance(response_text, str) and response_text.strip():
-            return response_text.strip()
-        summary = parsed.get("summary")
-        if isinstance(summary, str) and summary.strip():
-            return summary.strip()
-        if parsed.get("ok") and isinstance(parsed.get("stdout"), str) and parsed["stdout"].strip():
-            return _visible_stdout(str(parsed["stdout"]))
-        if parsed.get("error"):
-            return str(parsed["error"]).strip()
-    if parsed is not None:
-        # An opaque JSON payload (a dict with no user-facing field, or a list):
-        # pretty-print it so raw data reads as formatted JSON rather than a
-        # one-line blob. Capping and fenced-block styling happen at display time.
-        return json.dumps(parsed, indent=2, ensure_ascii=False)
-    # Non-JSON content is the tool's real text output; show it under the name.
-    return f"{tool_call.name} result: {content}"
-
-
-def _preferred_tool_response_text(tool_result: Any) -> str:
-    details = getattr(tool_result, "details", None)
-    if isinstance(details, dict):
-        response_text = details.get("response_text")
-        if isinstance(response_text, str) and response_text.strip():
-            return response_text.strip()
-    content = _content_to_text(getattr(tool_result, "content", "")).strip()
-    if not content:
-        return ""
-    try:
-        parsed = json.loads(content)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return ""
-    if not isinstance(parsed, dict):
-        return ""
-    response_text = parsed.get("response_text")
-    return response_text.strip() if isinstance(response_text, str) else ""
+def _stash_collapsed_tool_output(session: SessionState, text: str | None) -> None:
+    """Remember the full body so Ctrl+O can page it; no-op without a terminal."""
+    terminal = getattr(session, "terminal", None)
+    if terminal is None:
+        return
+    terminal.collapsed_tool_output = text
 
 
 def _has_preferred_tool_response_text(result: Any) -> bool:
     return any(
-        bool(_preferred_tool_response_text(tool_result))
+        bool(preferred_tool_response_text(tool_result))
         for _tool_call, tool_result in _generic_tool_results(result)
     )
 
@@ -544,7 +423,7 @@ def _has_quiet_shell_run(result: Any) -> bool:
 def _response_text_from_generic_results(result: Any) -> str:
     chunks: list[str] = []
     for tool_call, tool_result in _generic_tool_results(result):
-        formatted = _format_generic_tool_payload(tool_call, tool_result)
+        formatted = format_generic_tool_payload(tool_call, tool_result)
         if formatted:
             chunks.append(formatted)
     return "\n".join(chunks)
@@ -954,22 +833,39 @@ def _compose_response(
     final_text_chunk = "" if suppress_final else final_text
     # The model sometimes restates the plan (or every historical snapshot) in its
     # reply; the pinned overlay already shows it, so strip snapshots from display.
-    display_final = _strip_plan_snapshots(final_text_chunk)
+    display_final = strip_plan_snapshots(final_text_chunk)
     # History entries are already rendered by self-recording tools (shell/slash/…).
     # Console display uses final_text + generic results + hints only so users see
     # github_cli / other registry tools without double-printing shell output.
     # response_text still includes history for persistence / non-TTY surfaces.
-    display_generic = _cap_for_display(generic_text)
-    is_json = _looks_like_json(generic_text)
-    truncated = display_generic.endswith(_OUTPUT_TRUNCATED_MARKER)
+    display_generic = cap_for_display(generic_text)
+    # Defense: never fence a data blob into the transcript (summary/stdout leaks
+    # used to pretty-print truncated JSON behind a text fence).
+    if is_data_blob(generic_text):
+        display_generic = ""
+    # The shell observer already nested user-facing results under each ``⏺``
+    # call (Droid / Claude Code / Cursor). Repeating them in the closing
+    # would float a second copy after the reply. Leave the Ctrl+O stash the
+    # observer wrote; do not clear it with an empty preview.
+    already_inline = bool(getattr(terminal, "inline_tool_results", False))
+    if already_inline and terminal is not None:
+        terminal.inline_tool_results = False
+        display_generic = ""
+    is_json = looks_like_json(generic_text)
+    body, markers = split_output_truncation_markers(display_generic)
+    truncated = bool(markers)
+    if not already_inline:
+        _stash_collapsed_tool_output(session, generic_text if truncated else None)
     bulky = display_generic.count("\n") >= 4 or truncated
     if display_generic and (is_json or bulky):
         # Truncated JSON is invalid — fencing it as ``json`` makes Rich/Pygments
         # paint error tokens (red blocks) on the cut. Use a text fence instead
-        # and keep the truncation marker outside the block.
+        # and keep truncation markers outside the block.
         if truncated:
-            body = display_generic[: -len(_OUTPUT_TRUNCATED_MARKER)].rstrip("\n")
-            display_generic = f"\n```text\n{body}\n```\n{_OUTPUT_TRUNCATED_MARKER}"
+            if body:
+                display_generic = f"\n```text\n{body}\n```\n{markers}"
+            else:
+                display_generic = f"\n```text\n{display_generic}\n```"
         else:
             lang = "json" if is_json else "text"
             display_generic = f"\n```{lang}\n{display_generic}\n```"

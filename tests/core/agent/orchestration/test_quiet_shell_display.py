@@ -426,6 +426,26 @@ def test_selected_choice_keeps_meaningful_follow_up_response() -> None:
     assert session.terminal.pending_choice_response is None
 
 
+def test_inline_tool_results_are_not_repeated_in_the_closing() -> None:
+    """When the shell already nested results under ``⏺``, the closing stays the reply."""
+    github = ToolCall(id="1", name="github_cli", input={"command": "api user"})
+    result = _Result(
+        tool_results=[(github, _ToolResult({"ok": True, "summary": "GitHub API call succeeded."}))],
+        final_text="The repository is public.",
+    )
+    session = _Session()
+    session.terminal.inline_tool_results = True
+    session.terminal.collapsed_tool_output = "stashed-by-observer"
+
+    _response_text, display_chunks, _use_final = _compose_response(result, session, _counts(1))
+    shown = "\n".join(display_chunks)
+
+    assert "The repository is public." in shown
+    assert "GitHub API call succeeded." not in shown
+    assert session.terminal.inline_tool_results is False
+    assert session.terminal.collapsed_tool_output == "stashed-by-observer"
+
+
 def test_bulky_tool_output_is_capped_and_fenced_for_display() -> None:
     # A large tool result must not flood the transcript or blend into the report:
     # it is capped and shown in its own fenced code block for the console.
@@ -436,21 +456,23 @@ def test_bulky_tool_output_is_capped_and_fenced_for_display() -> None:
         final_text="Here is the run history.",
     )
 
-    response_text, display_chunks, _use_final = _compose_response(result, _Session(), _counts(1))
+    session = _Session()
+    response_text, display_chunks, _use_final = _compose_response(result, session, _counts(1))
     joined = "\n".join(display_chunks)
 
     # Display: capped + text-fenced (truncated content is not valid code to highlight).
     assert "```text" in joined
-    assert "… (output truncated)" in joined
+    assert "Ctrl+O to view" in joined
     assert joined.count("run ") <= 12
     assert "```text" not in response_text
     assert response_text.count("run ") == 30
+    assert session.terminal.collapsed_tool_output == bulky
 
 
 def test_truncated_json_uses_text_fence_not_json_highlight() -> None:
-    """Broken mid-JSON must not use a ``json`` fence (Rich paints red error tokens)."""
+    """Broken mid-JSON must not paint as a dumped fence — hide the blob."""
     github = ToolCall(id="1", name="posthog_mcp", input={"tool_name": "list"})
-    # Valid JSON over the line/char caps so _cap_for_display truncates it.
+    # Valid JSON over the line/char caps so _cap_for_display would truncate it.
     bulky_obj = {"tools": [{"name": f"tool_{i}", "description": "x" * 40} for i in range(40)]}
     bulky = json.dumps(bulky_obj, indent=2)
     result = _Result(
@@ -462,11 +484,31 @@ def test_truncated_json_uses_text_fence_not_json_highlight() -> None:
     joined = "\n".join(display_chunks)
 
     assert "```json" not in joined
-    assert "```text" in joined
-    assert "… (output truncated)" in joined
-    # Marker sits outside the fence so it is not syntax-highlighted as an error.
+    assert "followers_url" not in joined
+    assert '"tools"' not in joined
+    assert "Listed tools." in joined
+
+
+def test_character_and_line_truncation_markers_sit_outside_the_fence() -> None:
+    github = ToolCall(id="1", name="github_cli", input={"command": "run list"})
+    # Four-plus long lines so the display cap cuts the visible head *and* folds
+    # remainder — the single expand marker must stay outside the fence.
+    bulky = "\n".join("y" * 80 for _ in range(10))
+    result = _Result(
+        tool_results=[(github, _ToolResult(_payload(bulky)))],
+        final_text="Here is the run history.",
+    )
+
+    _response_text, display_chunks, _use_final = _compose_response(result, _Session(), _counts(1))
+    joined = "\n".join(display_chunks)
+
     fence_end = joined.index("```", joined.index("```text") + 1)
-    assert "… (output truncated)" in joined[fence_end:]
+    after = joined[fence_end:]
+    inside = joined[:fence_end]
+    assert "Ctrl+O to view" in after
+    assert "output truncated" not in joined
+    assert after.count("Ctrl+O to view") == 1
+    assert "Ctrl+O to view" not in inside
 
 
 def test_plan_snapshots_are_stripped_from_the_reply() -> None:
