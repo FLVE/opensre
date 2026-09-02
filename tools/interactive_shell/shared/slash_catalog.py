@@ -430,6 +430,16 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
         "Check for a newer OpenSRE version and update if available.",
         "User asks to update or upgrade OpenSRE",
     ),
+    "/loglevel": _mcp(
+        "Show or set the process log level. debug | info | warning | error. "
+        "Reveals the codebase's own logging: LLM requests, tool arguments, "
+        "outbound HTTP, database targets.",
+        "User asks to see debug logs or raise/lower log verbosity",
+        "User asks why a tool returned nothing and wants the underlying request",
+        anti_examples=(
+            "User asks to toggle the investigation path's verbose output (use /verbose)",
+        ),
+    ),
     "/verbose": _mcp(
         "Toggle verbose logging in the REPL. on | off.",
         "User asks to enable or disable verbose logging",

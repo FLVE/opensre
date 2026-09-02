@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 from rich.console import Console
@@ -24,6 +25,7 @@ from config.llm_reasoning_effort import (
     parse_reasoning_effort,
     provider_supports_reasoning_effort,
 )
+from infrastructure.logging import ShellLogHandler, parse_log_level, set_log_level
 from surfaces.interactive_shell.command_registry.types import SlashCommand
 from surfaces.interactive_shell.runtime import Session
 from surfaces.interactive_shell.ui import (
@@ -51,6 +53,13 @@ _AUTO_FIRST_ARGS: tuple[tuple[str, str], ...] = tuple(
 _VERBOSE_FIRST_ARGS: tuple[tuple[str, str], ...] = (
     ("on", "enable verbose logging"),
     ("off", "disable verbose logging"),
+)
+
+_LOGLEVEL_FIRST_ARGS: tuple[tuple[str, str], ...] = (
+    ("debug", "every log record, including LLM and HTTP detail"),
+    ("info", "milestones only"),
+    ("warning", "problems that did not fail the turn"),
+    ("error", "failures only (default)"),
 )
 
 
@@ -196,6 +205,46 @@ def _cmd_verbose(_session: Session, console: Console, args: list[str]) -> bool:
     return True
 
 
+def _effective_log_level(root: logging.Logger) -> int:
+    """Return the floor a record must clear to reach the shell's transcript.
+
+    The root logger filters first and the shell's handler then applies its own,
+    so the level in force is the higher of the two. Reporting the root level
+    alone claims WARNING is on while that ERROR handler discards those records.
+    """
+    root_level = root.getEffectiveLevel()
+    shell_handler = next((h for h in root.handlers if isinstance(h, ShellLogHandler)), None)
+    if shell_handler is None:
+        return root_level
+    return max(root_level, shell_handler.level)
+
+
+def _cmd_loglevel(_session: Session, console: Console, args: list[str]) -> bool:
+    """Show or set the root log level for this process.
+
+    Distinct from ``/verbose``, which only toggles ``debug_print`` output in the
+    investigation path. This is what makes the codebase's own ``logger`` calls —
+    LLM requests, tool arguments, outbound HTTP — visible at all.
+    """
+    root = logging.getLogger()
+    if not args:
+        console.print(
+            f"[{HIGHLIGHT}]log level: {logging.getLevelName(_effective_log_level(root))}[/]"
+        )
+        console.print(f"[{DIM}]set with /loglevel <debug|info|warning|error>[/]")
+        return True
+
+    level = parse_log_level(args[0])
+    if level is None:
+        console.print(f"[{WARNING}]unknown log level:[/] {escape(args[0])}")
+        console.print(f"[{DIM}]expected one of debug, info, warning, error, critical[/]")
+        return True
+
+    set_log_level(level)
+    console.print(f"[{HIGHLIGHT}]log level: {logging.getLevelName(level)}[/]")
+    return True
+
+
 COMMANDS: list[SlashCommand] = [
     SlashCommand(
         "/auto",
@@ -234,6 +283,18 @@ COMMANDS: list[SlashCommand] = [
         usage=("/verbose", "/verbose on", "/verbose off"),
         notes=("In a TTY, bare /verbose opens an interactive menu.",),
         first_arg_completions=_VERBOSE_FIRST_ARGS,
+    ),
+    SlashCommand(
+        "/loglevel",
+        "Show or set the log level.",
+        _cmd_loglevel,
+        usage=("/loglevel", "/loglevel debug", "/loglevel error"),
+        notes=(
+            "Reveals the codebase's own logging (LLM requests, tool arguments, "
+            "outbound HTTP), which is hidden below ERROR by default.",
+            "Set OPENSRE_LOG_LEVEL to apply it from process start.",
+        ),
+        first_arg_completions=_LOGLEVEL_FIRST_ARGS,
     ),
 ]
 

@@ -11,7 +11,13 @@ from rich.console import Console
 from config.repl_config import ReplConfig
 from core.agent_harness import SessionManager
 from infrastructure.analytics.github_identity import identify_saved_github_username
-from infrastructure.logging import install_shell_log_handler, quiet_noisy_third_party_loggers
+from infrastructure.logging import (
+    configured_log_level,
+    install_shell_log_handler,
+    quiet_noisy_third_party_loggers,
+    resolve_log_level,
+    set_log_level,
+)
 from infrastructure.terminal.theme import set_active_theme
 from surfaces.interactive_shell.controller import InteractiveShellController
 from surfaces.interactive_shell.runtime.context import create_repl_runtime
@@ -53,7 +59,15 @@ async def run_repl_async(
     # WARNING+ records print through the shell console, so one emitted from a
     # probe thread while a status spinner animates lands whole above it instead
     # of racing the spinner's redraw on the tty and staircasing what follows.
-    install_shell_log_handler(lambda: out)
+    # OPENSRE_LOG_LEVEL opens the handler and the root logger together; without
+    # both, the codebase's debug/info records never reach an operator.
+    install_shell_log_handler(lambda: out, level=resolve_log_level())
+    # Only on an explicit request: install_shell_log_handler leaves an embedding
+    # host's root handlers alone, and lowering the root logger unconditionally
+    # would override that host's configuration process-wide, past REPL exit.
+    requested_level = configured_log_level()
+    if requested_level is not None:
+        set_log_level(requested_level)
     # Let PromptBuilder build the prompt session so it can wire the
     # composer-hide (needs the session + REPL state, which do not exist yet).
     runtime_context = create_repl_runtime()

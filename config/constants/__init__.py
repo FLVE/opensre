@@ -201,6 +201,7 @@ from config.constants.llm import (
     LLM_PROVIDER_ENV,
     OPENSRE_LLM_NATIVE_STRUCTURED_OUTPUT_ENV,
 )
+from config.constants.logging import OPENSRE_LOG_LEVEL_ENV
 from config.constants.mariadb import (
     MARIADB_DATABASE_ENV,
     MARIADB_HOST_ENV,
@@ -698,6 +699,7 @@ __all__ = [
     "OPENSRE_OPERATIONS_LOG_FILENAME",
     "OPENSRE_OPERATIONS_LOG_MAX_BYTES_ENV",
     "OPENSRE_OPERATIONS_LOG_PATH_ENV",
+    "OPENSRE_LOG_LEVEL_ENV",
     "OPENSRE_HOME_DIR",
     "OPENSRE_HOME_ENV",
     "OPENSRE_LLM_NATIVE_STRUCTURED_OUTPUT_ENV",
