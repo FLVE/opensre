@@ -114,6 +114,11 @@ class GrafanaClientBase:
         self.loki_datasource_uid = config.loki_datasource_uid
         self.tempo_datasource_uid = config.tempo_datasource_uid
         self.mimir_datasource_uid = config.mimir_datasource_uid
+        # Ordered candidates for the metrics query; the single UID above stays
+        # the primary one so existing callers and guards are unaffected.
+        self.mimir_datasource_uids = config.mimir_datasource_uids or (
+            (config.mimir_datasource_uid,) if config.mimir_datasource_uid else ()
+        )
         self.uses_local_anonymous_auth = config.uses_local_anonymous_auth
 
     @property

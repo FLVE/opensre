@@ -8,6 +8,7 @@ from config.constants.grafana import (
     GRAFANA_INSTANCE_URL_ENV,
     GRAFANA_LOKI_DATASOURCE_UID_ENV,
     GRAFANA_MIMIR_DATASOURCE_UID_ENV,
+    GRAFANA_MIMIR_DATASOURCE_UIDS_ENV,
     GRAFANA_READ_TOKEN_ENV,
     GRAFANA_TEMPO_DATASOURCE_UID_ENV,
 )
@@ -98,6 +99,30 @@ def get_configured_datasource_uids() -> tuple[str, str, str]:
         _get_env(GRAFANA_TEMPO_DATASOURCE_UID_ENV).strip(),
         _get_env(GRAFANA_MIMIR_DATASOURCE_UID_ENV).strip(),
     )
+
+
+def get_configured_mimir_datasource_uids() -> tuple[str, ...]:
+    """Return the Mimir datasources to try, in the operator's order.
+
+    Reports only what ``GRAFANA_MIMIR_DATASOURCE_UIDS`` says, empty when it is
+    unset — like :func:`get_configured_datasource_uids`, and for the same
+    reason: a caller ranking configuration above discovery has to tell a
+    deliberate choice from a default. Listing one UID is a choice, so the
+    length of the result must not decide whether it is honoured.
+
+    Duplicates collapse: querying the same datasource twice only costs a round
+    trip.
+    """
+    load_env()
+    raw = _get_env(GRAFANA_MIMIR_DATASOURCE_UIDS_ENV).strip()
+    if not raw:
+        return ()
+    seen: dict[str, None] = {}
+    for part in raw.split(","):
+        uid = part.strip()
+        if uid:
+            seen.setdefault(uid, None)
+    return tuple(seen)
 
 
 def get_otlp_endpoint() -> str:

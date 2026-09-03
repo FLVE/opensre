@@ -18,6 +18,10 @@ class GrafanaAccountConfig(StrictConfigModel):
     loki_datasource_uid: str = ""
     tempo_datasource_uid: str = ""
     mimir_datasource_uid: str = ""
+    #: Every Mimir datasource to try, in order. Empty means "just the single
+    #: ``mimir_datasource_uid``"; a Grafana instance can front several
+    #: Prometheus servers whose metric coverage does not overlap.
+    mimir_datasource_uids: tuple[str, ...] = ()
     description: str = ""
     username: str = ""
     password: str = ""

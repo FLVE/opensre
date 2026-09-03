@@ -70,6 +70,9 @@ class QueryGrafanaMetricsOutput(BaseModel):
     )
     error: str | None = Field(default=None, description="Error details when query fails.")
     account_id: int | None = Field(default=None, description="Grafana account id when available.")
+    datasource_uid: str | None = Field(
+        default=None, description="Datasource that answered, when several are configured."
+    )
 
 
 def _query_grafana_metrics_extract_params(sources: dict[str, dict]) -> dict[str, Any]:
@@ -121,6 +124,10 @@ def _citation_summary(output: dict[str, Any], metric_name: str) -> str:
     start, end = output.get("start"), output.get("end")
     if start and end:
         parts.append(f"{start} → {end}")
+
+    datasource_uid = output.get("datasource_uid")
+    if datasource_uid:
+        parts.append(f"datasource {datasource_uid}")
 
     # Across every returned series: Prometheus does not order them, so quoting
     # the first one's range as the metric's range can be off by orders of
@@ -273,6 +280,10 @@ def query_grafana_metrics(
         "start": start,
         "end": end,
         "account_id": client.account_id,
+        # Which Prometheus answered. With several datasources configured the
+        # answer is not implied by the configuration, and a claim correlating
+        # two metrics has to say where each came from.
+        "datasource_uid": result.get("datasource_uid", ""),
     }
     if result.get("truncated_series"):
         output["truncated_series"] = result["truncated_series"]

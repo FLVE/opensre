@@ -188,81 +188,146 @@ class MimirMixin:
                 "metrics": [],
             }
 
-        ranged = bool(start and end)
-        if start and end:
-            url = self._build_datasource_url(
-                self.mimir_datasource_uid,
-                "/api/v1/query_range",
-            )
-            params = {
-                "query": query,
-                "start": start,
-                "end": end,
-                "step": _resolve_step(start, end, step),
-            }
-        else:
-            url = self._build_datasource_url(
-                self.mimir_datasource_uid,
-                "/api/v1/query",
-            )
-            params = {"query": query}
+        return _first_datasource_with_data(self, query, start=start, end=end, step=step)
 
-        # The expression that left the process is the first thing anyone wants
-        # when a metric query comes back empty, and it appears in no event,
-        # span or transcript.
-        logger.debug(
-            "mimir query endpoint=%s uid=%s promql=%s window=%s→%s step=%s",
-            "query_range" if ranged else "query",
-            self.mimir_datasource_uid,
-            query,
-            params.get("start", "-"),
-            params.get("end", "-"),
-            params.get("step", "-"),
+
+def _candidate_datasource_uids(client: GrafanaClientBase) -> tuple[str, ...]:
+    """Return the Mimir datasources to try, in the operator's order.
+
+    Falls back to the single configured UID so a client that predates the list
+    keeps working unchanged.
+    """
+    configured = tuple(getattr(client, "mimir_datasource_uids", ()) or ())
+    if configured:
+        return configured
+    return (client.mimir_datasource_uid,) if client.mimir_datasource_uid else ()
+
+
+def _first_datasource_with_data(
+    client: GrafanaClientBase,
+    query: str,
+    *,
+    start: str | None,
+    end: str | None,
+    step: str | None,
+) -> dict[str, Any]:
+    """Try each datasource until one answers with series.
+
+    A Grafana instance can front several Prometheus servers whose coverage does
+    not overlap, so "no series here" is not "no series anywhere". An error is
+    not decisive either: stopping at the first one would let a single dead
+    datasource hide every metric on the ones behind it. The first error is kept
+    rather than the last, because a malformed PromQL fails identically
+    everywhere and the first failure is the one that explains it.
+    """
+    first_error: dict[str, Any] | None = None
+    first_empty: dict[str, Any] | None = None
+    for uid in _candidate_datasource_uids(client):
+        outcome = _query_one_datasource(client, uid, query, start=start, end=end, step=step)
+        if not outcome.get("success"):
+            first_error = first_error or outcome
+            continue
+        if outcome.get("metrics"):
+            return outcome
+        first_empty = first_empty or outcome
+    if first_empty is not None:
+        return first_empty
+    if first_error is not None:
+        return first_error
+    return {"success": False, "error": "Mimir datasource not found", "metrics": []}
+
+
+def _query_one_datasource(
+    client: GrafanaClientBase,
+    datasource_uid: str,
+    query: str,
+    *,
+    start: str | None,
+    end: str | None,
+    step: str | None,
+) -> dict[str, Any]:
+    """Run one already-built query against one datasource."""
+    ranged = bool(start and end)
+    if start and end:
+        url = client._build_datasource_url(
+            datasource_uid,
+            "/api/v1/query_range",
         )
-        try:
-            data = self._make_get_request(url, params=params)
-            result = data.get("data", {}).get("result", [])
+        params = {
+            "query": query,
+            "start": start,
+            "end": end,
+            "step": _resolve_step(start, end, step),
+        }
+    else:
+        url = client._build_datasource_url(
+            datasource_uid,
+            "/api/v1/query",
+        )
+        params = {"query": query}
 
-            end_epoch = _parse_timestamp(end) if ranged and end else None
-            metrics = bound_series(
-                [
-                    _normalize_series(series, ranged=ranged, end_epoch=end_epoch)
-                    for series in result[:MAX_SERIES]
-                ]
+    # The expression that left the process is the first thing anyone wants
+    # when a metric query comes back empty, and it appears in no event,
+    # span or transcript.
+    logger.debug(
+        "mimir query endpoint=%s uid=%s promql=%s window=%s→%s step=%s",
+        "query_range" if ranged else "query",
+        datasource_uid,
+        query,
+        params.get("start", "-"),
+        params.get("end", "-"),
+        params.get("step", "-"),
+    )
+    try:
+        data = client._make_get_request(url, params=params)
+        result = data.get("data", {}).get("result", [])
+
+        end_epoch = _parse_timestamp(end) if ranged and end else None
+        metrics = bound_series(
+            [
+                _normalize_series(series, ranged=ranged, end_epoch=end_epoch)
+                for series in result[:MAX_SERIES]
+            ]
+        )
+
+        payload: dict[str, Any] = {
+            "success": True,
+            "metrics": metrics,
+            "total_series": len(result),
+            "query": query,
+            "account_id": client.account_id,
+            # Which Prometheus answered: correlating two metrics is only
+            # defensible if the report can say where each came from.
+            "datasource_uid": datasource_uid,
+        }
+        if len(result) > MAX_SERIES:
+            payload["truncated_series"] = len(result) - MAX_SERIES
+            payload["truncation_hint"] = truncation_hint(MAX_SERIES, len(result))
+            # Dropping most of the series changes what the diagnosis rests
+            # on; the agent is told, and so is whoever reads the logs.
+            logger.info(
+                "mimir query capped at %d of %d series for %s",
+                MAX_SERIES,
+                len(result),
+                query,
             )
+        return payload
+    except Exception as e:
+        error_msg = str(e)
+        response_text = ""
+        if hasattr(e, "response") and e.response is not None:
+            response_text = e.response.text[:300]
+            error_msg = f"Mimir query failed: {e.response.status_code}"
 
-            payload: dict[str, Any] = {
-                "success": True,
-                "metrics": metrics,
-                "total_series": len(result),
-                "query": query,
-                "account_id": self.account_id,
-            }
-            if len(result) > MAX_SERIES:
-                payload["truncated_series"] = len(result) - MAX_SERIES
-                payload["truncation_hint"] = truncation_hint(MAX_SERIES, len(result))
-                # Dropping most of the series changes what the diagnosis rests
-                # on; the agent is told, and so is whoever reads the logs.
-                logger.info(
-                    "mimir query capped at %d of %d series for %s",
-                    MAX_SERIES,
-                    len(result),
-                    query,
-                )
-            return payload
-        except Exception as e:
-            error_msg = str(e)
-            response_text = ""
-            if hasattr(e, "response") and e.response is not None:
-                response_text = e.response.text[:300]
-                error_msg = f"Mimir query failed: {e.response.status_code}"
-
-            # An expired token or a PromQL syntax error otherwise reaches only
-            # the model, as an `available: false` result nobody else ever sees.
-            logger.warning("mimir query failed promql=%s error=%s", query, error_msg)
-            return {
-                "success": False,
-                "error": error_msg,
-                "response": response_text,
-                "metrics": [],
-            }
+        # An expired token or a PromQL syntax error otherwise reaches only
+        # the model, as an `available: false` result nobody else ever sees.
+        logger.warning(
+            "mimir query failed uid=%s promql=%s error=%s", datasource_uid, query, error_msg
+        )
+        return {
+            "success": False,
+            "error": error_msg,
+            "response": response_text,
+            "metrics": [],
+            "datasource_uid": datasource_uid,
+        }

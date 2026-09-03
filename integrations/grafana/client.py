@@ -15,6 +15,7 @@ from config.constants.grafana import (
 from config.grafana_cloud import (
     DEFAULT_INSTANCE_URL,
     get_configured_datasource_uids,
+    get_configured_mimir_datasource_uids,
     get_datasource_uids,
 )
 from integrations.grafana.base import GrafanaClientBase
@@ -177,6 +178,13 @@ def _build_and_cache_client(
     loki_uid = set_loki or discovered.get("loki_uid") or default_loki
     tempo_uid = set_tempo or discovered.get("tempo_uid") or default_tempo
     mimir_uid = set_mimir or discovered.get("mimir_uid") or default_mimir
+    # An operator listing several Prometheus datasources wins over both the
+    # single UID and discovery; the resolved single UID is the fallback entry.
+    # Whether the plural variable was set at all, never how many UIDs it holds:
+    # one listed UID is as deliberate as three, and falling back on a one-item
+    # list would hand the query to the discovered isDefault datasource instead.
+    configured_mimir_uids = get_configured_mimir_datasource_uids()
+    mimir_uids = configured_mimir_uids or (mimir_uid,)
     # Discovery picks the `isDefault` datasource, which on an instance holding
     # several Prometheus datasources is often not the one carrying the metrics
     # in question. Which rung of the ladder won explains an empty result set
@@ -207,6 +215,7 @@ def _build_and_cache_client(
             loki_datasource_uid=loki_uid,
             tempo_datasource_uid=tempo_uid,
             mimir_datasource_uid=mimir_uid,
+            mimir_datasource_uids=mimir_uids,
         )
         client = GrafanaClient(config=config)
         logger.info(
